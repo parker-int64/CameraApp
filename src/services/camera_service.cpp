@@ -117,7 +117,7 @@ void CameraService::start() {
 
   LOG_INFO("Camera service start requested");
   elapsed_ms_    = 0;
-  new_frame_     = false;
+  latest_frame_.reset();
   preview_ready_ = false;
   capture_state_ = CaptureState::Idle;
   last_capture_path_.clear();
@@ -152,7 +152,7 @@ void CameraService::stop() {
 #endif
   state_          = CameraServiceState::Idle;
   elapsed_ms_     = 0;
-  new_frame_      = false;
+  latest_frame_.reset();
   preview_ready_  = false;
   status_message_ = "Camera idle";
 }
@@ -175,10 +175,9 @@ void CameraService::update(uint32_t delta_ms) {
 #else
   (void)delta_ms;
   if (state_ == CameraServiceState::Ready && backend_) {
-    CameraFrame frame;
+    CameraFramePtr frame;
     if (backend_->consume_frame(frame)) {
       latest_frame_  = std::move(frame);
-      new_frame_     = true;
       preview_ready_ = true;
     }
 
@@ -201,13 +200,12 @@ void CameraService::update(uint32_t delta_ms) {
 #endif
 }
 
-bool CameraService::consume_frame(CameraFrame& frame) {
-  if (!new_frame_) {
+bool CameraService::consume_frame(CameraFramePtr& frame) {
+  if (!latest_frame_) {
     return false;
   }
 
-  frame      = latest_frame_;
-  new_frame_ = false;
+  frame      = std::move(latest_frame_);
   return true;
 }
 
@@ -243,6 +241,8 @@ bool CameraService::start_video_recording(int fps, int quality) {
   }
 
 #if USE_DESKTOP
+  (void)fps;
+  (void)quality;
   last_video_path_ = "desktop-preview-not-recorded.avi";
   video_state_     = VideoState::Failed;
   return false;
@@ -361,12 +361,10 @@ VideoState CameraService::consume_video_state(std::string* path) {
 void CameraService::generate_placeholder_frame_() {
   constexpr int width  = kPreviewWidth;
   constexpr int height = kPreviewHeight;
-  if (latest_frame_.width != width || latest_frame_.height != height ||
-      latest_frame_.rgb565.size() != static_cast<size_t>(width * height)) {
-    latest_frame_.width  = width;
-    latest_frame_.height = height;
-    latest_frame_.rgb565.assign(width * height, 0);
-  }
+  auto frame    = std::make_shared<CameraFrame>();
+  frame->width  = width;
+  frame->height = height;
+  frame->rgb565.resize(width * height);
 
   const uint32_t t = elapsed_ms_ / 16;
   for (int y = 0; y < height; ++y) {
@@ -374,12 +372,12 @@ void CameraService::generate_placeholder_frame_() {
       const uint8_t r                     = static_cast<uint8_t>((x + t) & 0xFF);
       const uint8_t g                     = static_cast<uint8_t>((y * 2 + t) & 0xFF);
       const uint8_t b                     = static_cast<uint8_t>((x + y + t * 2) & 0xFF);
-      latest_frame_.rgb565[y * width + x] = rgb888_to_rgb565(r, g, b);
+      frame->rgb565[y * width + x] = rgb888_to_rgb565(r, g, b);
     }
   }
 
+  latest_frame_  = std::move(frame);
   preview_ready_ = true;
-  new_frame_     = true;
 
   (void)capture_resolution_;
   (void)zoom_state_;

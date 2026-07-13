@@ -10,7 +10,6 @@
 
 #include <cstddef>
 #include <string>
-#include <vector>
 
 #include "services/camera_service.h"
 #include "views/base_view.h"
@@ -27,8 +26,7 @@ class CameraView : public BaseView {
   explicit CameraView(lv_obj_t* parent);
   ~CameraView() override;
 
-  // void show_shortcut_hints(bool show);
-  void set_preview_frame(const service::CameraFrame& frame);
+  void set_preview_frame(service::CameraFramePtr frame);
   void set_zoom_state(const service::CameraZoomState& state);
   void play_capture_feedback();
   void set_capture_status(service::CaptureState state, const std::string& path);
@@ -38,7 +36,6 @@ class CameraView : public BaseView {
   void build_();
   void build_container_();
   lv_obj_t* build_container_(lv_align_t align, size_t width, size_t height);
-  void build_top_container_();
   void build_bottom_container_();
   void build_preview_();
   void build_zoom_navigator_();
@@ -52,10 +49,7 @@ class CameraView : public BaseView {
                          int32_t x_offset  = 0,
                          bool use_raw_icon = false);
 
-  void build_help_icon_keypad_();
-
  private:
-  lv_obj_t* tool_top_{nullptr};
   lv_obj_t* tool_bottom_{nullptr};
   lv_obj_t* preview_container_{nullptr};
   lv_obj_t* preview_image_{nullptr};
@@ -72,11 +66,9 @@ class CameraView : public BaseView {
   IconKeypad gallery_icon_{};
   IconKeypad shutter_icon_{};
 
-  lv_obj_t* help_label_{nullptr};
-  // bool shortcut_hints_visible_{false};
   uint32_t freeze_preview_until_ms_{0};
   lv_image_dsc_t preview_dsc_{};
-  std::vector<uint16_t> preview_buffer_;
+  service::CameraFramePtr preview_frame_;
 };
 
 }  // namespace view

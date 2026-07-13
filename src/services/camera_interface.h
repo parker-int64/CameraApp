@@ -13,7 +13,7 @@ class CameraInterface {
   virtual const char* backend_name() const                                = 0;
   virtual bool open()                                                     = 0;
   virtual void close()                                                    = 0;
-  virtual bool consume_frame(CameraFrame& frame)                          = 0;
+  virtual bool consume_frame(CameraFramePtr& frame)                       = 0;
   virtual bool request_capture()                                          = 0;
   virtual bool start_video_recording(int fps, int quality)                = 0;
   virtual bool stop_video_recording()                                     = 0;

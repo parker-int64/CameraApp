@@ -51,6 +51,8 @@ class MjpegAviWriter {
   long movi_size_offset_{0};
   long movi_data_start_{0};
   std::vector<IndexEntry> index_;
+  std::vector<uint8_t> rgb_buffer_;
+  std::vector<uint8_t> jpeg_buffer_;
 };
 
 }  // namespace service::camera_backend

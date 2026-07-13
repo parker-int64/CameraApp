@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -262,9 +263,9 @@ struct LibcameraBackend::Impl {
   std::vector<libcamera::FrameBuffer*> free_still_buffers;
   std::map<const libcamera::FrameBuffer*, MappedBuffer> mapped_buffers;
   std::mutex mutex;
-  CameraFrame pending_frame;
+  std::mutex video_mutex;
+  CameraFramePtr pending_frame;
   std::vector<uint8_t> still_rgb;
-  bool new_frame{false};
   bool opened{false};
   bool streaming{false};
   std::atomic<bool> capture_requested{false};
@@ -367,10 +368,8 @@ struct LibcameraBackend::Impl {
 
     {
       std::lock_guard<std::mutex> lock(mutex);
-      pending_frame.width  = kPreviewWidth;
-      pending_frame.height = kPreviewHeight;
-      pending_frame.rgb565.assign(kPreviewWidth * kPreviewHeight, 0);
-      still_rgb.assign(still_w * still_h * 3, 0);
+      pending_frame.reset();
+      std::vector<uint8_t>().swap(still_rgb);
     }
 
     allocator                   = std::make_unique<libcamera::FrameBufferAllocator>(camera);
@@ -520,10 +519,13 @@ struct LibcameraBackend::Impl {
 
     camera->requestCompleted.connect(this, &Impl::request_complete);
 
-    if (camera->start()) {
-      last_error = "Camera start failed";
-      LOG_WARN("{}: preview={}x{} still={}x{} buffers={}",
+    const int start_result = camera->start();
+    if (start_result < 0) {
+      const int error_code = -start_result;
+      last_error = "Camera start failed: " + std::string(std::strerror(error_code));
+      LOG_WARN("{} ({}) preview={}x{} still={}x{} buffers={}",
                last_error,
+               start_result,
                preview_w,
                preview_h,
                still_w,
@@ -686,13 +688,12 @@ struct LibcameraBackend::Impl {
     opened = false;
   }
 
-  bool consume_frame(CameraFrame& frame) {
+  bool consume_frame(CameraFramePtr& frame) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (!new_frame) {
+    if (!pending_frame) {
       return false;
     }
-    frame     = pending_frame;
-    new_frame = false;
+    frame     = std::move(pending_frame);
     return true;
   }
 
@@ -701,9 +702,9 @@ struct LibcameraBackend::Impl {
       return false;
     }
 
-    last_capture_path = make_photo_path();
     {
       std::lock_guard<std::mutex> lock(mutex);
+      last_capture_path = make_photo_path();
       capture_state = CaptureState::Requested;
     }
     capture_requested = true;
@@ -711,6 +712,7 @@ struct LibcameraBackend::Impl {
   }
 
   bool start_video_recording(int fps, int quality) {
+    std::lock_guard<std::mutex> video_lock(video_mutex);
     if (!opened || !streaming || preview_w <= 0 || preview_h <= 0) {
       video_state = VideoState::Failed;
       last_error  = "Camera preview stream is not ready for video recording";
@@ -732,6 +734,7 @@ struct LibcameraBackend::Impl {
   }
 
   bool stop_video_recording() {
+    std::lock_guard<std::mutex> video_lock(video_mutex);
     if (!video_writer.is_open()) {
       return video_state != VideoState::Failed;
     }
@@ -746,6 +749,7 @@ struct LibcameraBackend::Impl {
   }
 
   VideoState consume_video_state(std::string* path) {
+    std::lock_guard<std::mutex> video_lock(video_mutex);
     const VideoState state = video_state;
     if (path) {
       *path = last_video_path_value;
@@ -1213,31 +1217,38 @@ struct LibcameraBackend::Impl {
       sync_dma_buf(plane.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
     }
 
-    {
+    CameraFrame preview_frame;
+    const bool converted = convert_frame_to_outputs(plane_data,
+                                                    bytes_used,
+                                                    width,
+                                                    height,
+                                                    stride,
+                                                    map_libcamera_format(format),
+                                                    is_still,
+                                                    is_still ? nullptr : &preview_frame,
+                                                    is_still ? &still_rgb : nullptr);
+    if (converted && is_still) {
+      const ExifMetadata exif_metadata = build_still_exif_metadata(request, width, height);
+      std::string capture_path;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        capture_path = last_capture_path;
+      }
+      const bool saved =
+          save_jpeg_rgb888(capture_path, still_rgb, width, height, 92, &exif_metadata);
       std::lock_guard<std::mutex> lock(mutex);
-      const bool converted = convert_frame_to_outputs(plane_data,
-                                                      bytes_used,
-                                                      width,
-                                                      height,
-                                                      stride,
-                                                      map_libcamera_format(format),
-                                                      is_still,
-                                                      is_still ? nullptr : &pending_frame,
-                                                      is_still ? &still_rgb : nullptr);
-      if (converted && is_still) {
-        const ExifMetadata exif_metadata = build_still_exif_metadata(request, width, height);
-        const bool saved =
-            save_jpeg_rgb888(last_capture_path, still_rgb, width, height, 92, &exif_metadata);
-        capture_state = saved ? CaptureState::Saved : CaptureState::Failed;
-      } else if (converted) {
-        pending_frame.width  = width;
-        pending_frame.height = height;
-        new_frame            = true;
-        if (video_writer.is_open() &&
-            !video_writer.write_rgb565_frame(pending_frame, video_quality)) {
-          video_state = VideoState::Failed;
-          (void)video_writer.close();
-        }
+      capture_state = saved ? CaptureState::Saved : CaptureState::Failed;
+    } else if (converted) {
+      auto completed_frame = std::make_shared<CameraFrame>(std::move(preview_frame));
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        pending_frame = completed_frame;
+      }
+      std::lock_guard<std::mutex> video_lock(video_mutex);
+      if (video_writer.is_open() &&
+          !video_writer.write_rgb565_frame(*completed_frame, video_quality)) {
+        video_state = VideoState::Failed;
+        (void)video_writer.close();
       }
     }
 
@@ -1273,7 +1284,7 @@ void LibcameraBackend::close() {
 #endif
 }
 
-bool LibcameraBackend::consume_frame(CameraFrame& frame) {
+bool LibcameraBackend::consume_frame(CameraFramePtr& frame) {
 #if USE_DESKTOP
   (void)frame;
   return false;

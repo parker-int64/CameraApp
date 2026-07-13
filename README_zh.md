@@ -43,7 +43,8 @@ sudo apt install -y \
 
 ### 2. Desktop 本地预览依赖
 
-Desktop 模式用于本机 SDL/LVGL 预览，不会启用 CM0 的 Linux framebuffer/DRM、libcamera 和 ALSA 交叉依赖。
+音频播放和录音使用 miniaudio 的 PulseAudio backend。BSP 提供 `miniaudio.h`，运行时使用
+PulseAudio 的默认 sink 和 source。
 
 ```bash
 sudo apt install -y \
@@ -73,7 +74,6 @@ sudo apt install -y \
   libpng-dev:arm64 \
   libjpeg-dev:arm64 \
   zlib1g-dev:arm64 \
-  libasound2-dev:arm64 \
   libcamera-dev:arm64 \
   libfmt-dev:arm64 \
   libcjson-dev:arm64

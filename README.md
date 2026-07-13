@@ -25,7 +25,8 @@ CM0 cross builds use `cmake/toolchains/cp0-aarch64-linux-gnu.cmake`. The default
 
 ## Dependencies
 
-Desktop preview uses SDL/LVGL and does not enable the CM0 framebuffer/DRM, libcamera, or ALSA runtime backends.
+Audio playback and capture use miniaudio with the PulseAudio backend. The bundled BSP provides
+`miniaudio.h`; PulseAudio supplies the default sink and source at runtime.
 
 ```bash
 sudo apt install -y \
@@ -45,7 +46,6 @@ sudo apt install -y \
   libpng-dev:arm64 \
   libjpeg-dev:arm64 \
   zlib1g-dev:arm64 \
-  libasound2-dev:arm64 \
   libcamera-dev:arm64 \
   libfmt-dev:arm64 \
   libcjson-dev:arm64

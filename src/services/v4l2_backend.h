@@ -14,7 +14,7 @@ class V4l2Backend final : public CameraInterface {
   const char* backend_name() const override { return "v4l2"; }
   bool open() override;
   void close() override;
-  bool consume_frame(CameraFrame& frame) override;
+  bool consume_frame(CameraFramePtr& frame) override;
   bool request_capture() override;
   bool start_video_recording(int fps, int quality) override;
   bool stop_video_recording() override;

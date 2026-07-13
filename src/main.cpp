@@ -88,20 +88,26 @@ lv_display_t* setup_fb_display(const char* fb_device) {
 }
 
 #if APP_USE_DRM
-lv_display_t* setup_drm_display(const char* drm_device) {
+lv_display_t* setup_drm_display(const char* drm_device, int64_t connector_id) {
   lv_display_t* display = lv_linux_drm_create();
   if (display == nullptr) {
     LOG_ERROR("Failed to create Linux DRM display");
     return nullptr;
   }
 
-  LOG_DEBUG("Create Linux DRM display with {}", drm_device);
-  if (lv_linux_drm_set_file(display, drm_device, -1) != LV_RESULT_OK) {
-    LOG_ERROR("Failed to set Linux DRM device: {}", drm_device);
+  LOG_DEBUG("Create Linux DRM display with {} connector={}", drm_device, connector_id);
+  if (lv_linux_drm_set_file(display, drm_device, connector_id) != LV_RESULT_OK) {
+    LOG_ERROR("Failed to set Linux DRM device: {} connector={}", drm_device, connector_id);
     lv_display_delete(display);
     return nullptr;
   }
 
+  LOG_INFO("Using DRM display: device={} connector={} resolution={}x{} refresh={}ms",
+           drm_device,
+           connector_id,
+           lv_display_get_horizontal_resolution(display),
+           lv_display_get_vertical_resolution(display),
+           LV_DEF_REFR_PERIOD);
   return display;
 }
 #endif
@@ -180,7 +186,7 @@ lv_display_t* setup_display() {
 #if APP_USE_DRM
   const char* env_device = std::getenv("CAMERA_APP_DRM_DEVICE");
   const char* drm_device = env_device && env_device[0] ? env_device : APP_DRM_DEVICE;
-  if (lv_display_t* display = setup_drm_display(drm_device)) {
+  if (lv_display_t* display = setup_drm_display(drm_device, APP_DRM_CONNECTOR_ID)) {
     return display;
   }
 
@@ -239,9 +245,9 @@ void handle_navigation(screen::ScreenManager& manager, app::AppStateMachine& sta
   auto camera_vm   = std::dynamic_pointer_cast<viewmodel::CameraViewModel>(current->viewmodel());
   auto camera_view = dynamic_cast<view::CameraView*>(current->view());
   if (camera_vm && camera_view) {
-    service::CameraFrame frame;
+    service::CameraFramePtr frame;
     if (camera_vm->consume_frame(frame)) {
-      camera_view->set_preview_frame(frame);
+      camera_view->set_preview_frame(std::move(frame));
     }
     camera_view->set_zoom_state(camera_vm->zoom_state());
 

@@ -2,466 +2,412 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
-#include <thread>
+#include <utility>
 #include <vector>
+
+#define MINIAUDIO_IMPLEMENTATION
+#ifdef APP_MINIAUDIO_HEADER
+#include APP_MINIAUDIO_HEADER
+#else
+#include <miniaudio.h>
+#endif
 
 #include "utils/asset_manager.h"
 #include "utils/logger.h"
 
-#if !USE_DESKTOP && APP_USE_ALSA
-#include <alsa/asoundlib.h>
-#endif
-
 namespace service {
 namespace {
 
-constexpr const char* kShutterAsset        = "audio/shutter.wav";
-constexpr const char* kPressAsset          = "audio/click.wav";
-constexpr const char* kRecordStartAsset    = "";
-constexpr const char* kRecordFinishedAsset = "";
-constexpr unsigned int kRecordRate         = 48000;
-constexpr unsigned int kRecordChannels     = 1;
-constexpr unsigned int kBitsPerSample      = 16;
-constexpr size_t kPeriodFrames             = 1024;
+constexpr const char* kShutterAsset = "audio/shutter.wav";
+constexpr const char* kClickAsset   = "audio/click.wav";
+constexpr ma_uint32 kPlaybackChannels = 2;
+constexpr ma_uint32 kCaptureRate      = 16000;
+constexpr ma_uint32 kCaptureChannels  = 1;
 
-struct WavData {
-  unsigned int channels{0};
-  unsigned int sample_rate{0};
-  unsigned int bits_per_sample{0};
-  std::vector<uint8_t> pcm;
+struct AudioData {
+  ma_uint32 sample_rate{0};
+  ma_uint32 channels{0};
+  std::vector<int16_t> samples;
 };
 
-uint16_t read_le16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
-
-uint32_t read_le32(const uint8_t* p) {
-  return static_cast<uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
-}
-
-void write_le16(std::ostream& out, uint16_t value) {
-  const char bytes[] = {
-      static_cast<char>(value & 0xFF),
-      static_cast<char>((value >> 8) & 0xFF),
-  };
-  out.write(bytes, sizeof(bytes));
-}
-
-void write_le32(std::ostream& out, uint32_t value) {
-  const char bytes[] = {
-      static_cast<char>(value & 0xFF),
-      static_cast<char>((value >> 8) & 0xFF),
-      static_cast<char>((value >> 16) & 0xFF),
-      static_cast<char>((value >> 24) & 0xFF),
-  };
-  out.write(bytes, sizeof(bytes));
-}
-
-bool load_wav_asset(const char* asset_name, WavData& wav) {
-  asset::BinaryAsset asset;
-  if (!asset::AssetManager::read_binary(asset_name, asset)) {
-    LOG_WARN("Audio asset not found: {}", asset_name);
-    return false;
+std::shared_ptr<AudioData> load_audio_asset(const char* asset_name) {
+  std::string path;
+  if (!asset_name || !asset::AssetManager::resolve_path(asset_name, path)) {
+    LOG_WARN("Audio asset not found: {}", asset_name ? asset_name : "");
+    return nullptr;
   }
 
-  const auto& data = asset.data;
-  if (data.size() < 44 || std::memcmp(data.data(), "RIFF", 4) != 0 ||
-      std::memcmp(data.data() + 8, "WAVE", 4) != 0) {
-    LOG_WARN("Invalid WAV asset: {}", asset.path);
-    return false;
+  ma_decoder_config config = ma_decoder_config_init(ma_format_s16, 0, 0);
+  ma_uint64 frame_count    = 0;
+  void* pcm_frames         = nullptr;
+  const ma_result result = ma_decode_file(path.c_str(), &config, &frame_count, &pcm_frames);
+  if (result != MA_SUCCESS || !pcm_frames || frame_count == 0 || config.channels == 0 ||
+      config.sampleRate == 0) {
+    LOG_WARN("Failed to decode audio asset {}: {}", path, ma_result_description(result));
+    if (pcm_frames) {
+      ma_free(pcm_frames, nullptr);
+    }
+    return nullptr;
   }
 
-  bool found_fmt        = false;
-  bool found_data       = false;
-  uint16_t audio_format = 0;
-  size_t offset         = 12;
-  while (offset + 8 <= data.size()) {
-    const uint8_t* chunk      = data.data() + offset;
-    const uint32_t chunk_size = read_le32(chunk + 4);
-    const size_t payload      = offset + 8;
-    if (payload + chunk_size > data.size()) {
+  auto audio                     = std::make_shared<AudioData>();
+  audio->sample_rate             = config.sampleRate;
+  audio->channels                = config.channels;
+  const size_t sample_count      = static_cast<size_t>(frame_count) * config.channels;
+  const auto* decoded_samples    = static_cast<const int16_t*>(pcm_frames);
+  audio->samples.assign(decoded_samples, decoded_samples + sample_count);
+  ma_free(pcm_frames, nullptr);
+  LOG_DEBUG("Loaded audio asset: {} rate={} channels={}",
+            path,
+            audio->sample_rate,
+            audio->channels);
+  return audio;
+}
+
+std::string device_id(ma_backend backend, const ma_device_id& id) {
+  if (backend == ma_backend_pulseaudio) {
+    return id.pulse;
+  }
+
+  constexpr char kHex[] = "0123456789abcdef";
+  constexpr size_t kMaxBytes = 16;
+  const auto* bytes = reinterpret_cast<const unsigned char*>(&id);
+  std::string value;
+  value.reserve(kMaxBytes * 2);
+  for (size_t i = 0; i < kMaxBytes && i < sizeof(ma_device_id); ++i) {
+    value.push_back(kHex[bytes[i] >> 4U]);
+    value.push_back(kHex[bytes[i] & 0x0FU]);
+  }
+  return value;
+}
+
+const ma_device_info* select_default_device(ma_device_info* devices,
+                                            ma_uint32 count,
+                                            const char* direction,
+                                            ma_backend backend) {
+  if (!devices || count == 0) {
+    LOG_ERROR("No miniaudio {} device found", direction);
+    return nullptr;
+  }
+
+  const ma_device_info* selected = &devices[0];
+  for (ma_uint32 i = 0; i < count; ++i) {
+    if (devices[i].isDefault) {
+      selected = &devices[i];
       break;
     }
-
-    if (std::memcmp(chunk, "fmt ", 4) == 0 && chunk_size >= 16) {
-      audio_format        = read_le16(data.data() + payload);
-      wav.channels        = read_le16(data.data() + payload + 2);
-      wav.sample_rate     = read_le32(data.data() + payload + 4);
-      wav.bits_per_sample = read_le16(data.data() + payload + 14);
-      found_fmt           = true;
-    } else if (std::memcmp(chunk, "data", 4) == 0) {
-      wav.pcm.assign(data.begin() + static_cast<std::ptrdiff_t>(payload),
-                     data.begin() + static_cast<std::ptrdiff_t>(payload + chunk_size));
-      found_data = true;
-    }
-
-    offset = payload + chunk_size + (chunk_size & 1u);
   }
+  LOG_INFO("Selected PulseAudio {}: name='{}' id='{}'",
+           direction,
+           selected->name,
+           device_id(backend, selected->id));
+  return selected;
+}
 
-  if (!found_fmt || !found_data || audio_format != 1 || wav.channels == 0 || wav.sample_rate == 0 ||
-      wav.bits_per_sample != 16 || wav.pcm.empty()) {
-    LOG_WARN("Unsupported WAV asset format: {}", asset.path);
+bool write_wav_file(const std::string& path, const std::vector<int16_t>& samples) {
+  if (path.empty() || samples.empty()) {
     return false;
   }
 
-  LOG_DEBUG("Loaded WAV asset: {}", asset.path);
+  (void)std::remove(path.c_str());
+  ma_encoder_config config =
+      ma_encoder_config_init(ma_encoding_format_wav, ma_format_s16, kCaptureChannels, kCaptureRate);
+  ma_encoder encoder{};
+  ma_result result = ma_encoder_init_file(path.c_str(), &config, &encoder);
+  if (result != MA_SUCCESS) {
+    LOG_ERROR("Failed to create WAV file {}: {}", path, ma_result_description(result));
+    return false;
+  }
+
+  ma_uint64 frames_written = 0;
+  const ma_uint64 frames   = samples.size() / kCaptureChannels;
+  result = ma_encoder_write_pcm_frames(&encoder, samples.data(), frames, &frames_written);
+  ma_encoder_uninit(&encoder);
+  if (result != MA_SUCCESS || frames_written != frames) {
+    LOG_ERROR("Failed to write WAV file {}: {}", path, ma_result_description(result));
+    return false;
+  }
   return true;
 }
-
-void write_wav_header(std::ostream& out,
-                      uint32_t data_size,
-                      uint32_t sample_rate,
-                      uint16_t channels,
-                      uint16_t bits_per_sample) {
-  const uint32_t byte_rate   = sample_rate * channels * bits_per_sample / 8;
-  const uint16_t block_align = channels * bits_per_sample / 8;
-
-  out.seekp(0, std::ios::beg);
-  out.write("RIFF", 4);
-  write_le32(out, 36 + data_size);
-  out.write("WAVE", 4);
-  out.write("fmt ", 4);
-  write_le32(out, 16);
-  write_le16(out, 1);
-  write_le16(out, channels);
-  write_le32(out, sample_rate);
-  write_le32(out, byte_rate);
-  write_le16(out, block_align);
-  write_le16(out, bits_per_sample);
-  out.write("data", 4);
-  write_le32(out, data_size);
-}
-
-#if !USE_DESKTOP && APP_USE_ALSA
-void append_unique_device(std::vector<std::string>& devices, const char* device) {
-  if (!device || !device[0]) {
-    return;
-  }
-
-  if (std::find(devices.begin(), devices.end(), device) == devices.end()) {
-    devices.emplace_back(device);
-  }
-}
-
-std::vector<std::string> playback_device_candidates() {
-  std::vector<std::string> devices;
-  append_unique_device(devices, std::getenv("CAMERA_APP_ALSA_PLAYBACK_DEVICE"));
-  append_unique_device(devices, std::getenv("CAMERA_APP_ALSA_DEVICE"));
-  append_unique_device(devices, APP_ALSA_PLAYBACK_DEVICE);
-  append_unique_device(devices, "default:CARD=ES8388Audio");
-  append_unique_device(devices, "plughw:CARD=ES8388Audio,DEV=0");
-  append_unique_device(devices, "dmix:CARD=ES8388Audio,DEV=0");
-  append_unique_device(devices, "default");
-  append_unique_device(devices, "default:CARD=vc4hdmi");
-  append_unique_device(devices, "plughw:CARD=vc4hdmi,DEV=0");
-  return devices;
-}
-
-std::vector<std::string> capture_device_candidates() {
-  std::vector<std::string> devices;
-  append_unique_device(devices, std::getenv("CAMERA_APP_ALSA_CAPTURE_DEVICE"));
-  append_unique_device(devices, std::getenv("CAMERA_APP_ALSA_DEVICE"));
-  append_unique_device(devices, APP_ALSA_CAPTURE_DEVICE);
-  append_unique_device(devices, "default:CARD=ES8388Audio");
-  append_unique_device(devices, "plughw:CARD=ES8388Audio,DEV=0");
-  append_unique_device(devices, "default");
-  return devices;
-}
-
-bool open_pcm_from_candidates(snd_pcm_t** pcm,
-                              snd_pcm_stream_t stream,
-                              const std::vector<std::string>& devices,
-                              std::string& opened_device) {
-  for (const auto& device : devices) {
-    const int err = snd_pcm_open(pcm, device.c_str(), stream, 0);
-    if (err >= 0) {
-      opened_device = device;
-      LOG_INFO("ALSA {} opened: {}",
-               stream == SND_PCM_STREAM_PLAYBACK ? "playback" : "capture",
-               device);
-      return true;
-    }
-
-    LOG_WARN("ALSA {} open failed for {}: {} ({})",
-             stream == SND_PCM_STREAM_PLAYBACK ? "playback" : "capture",
-             device,
-             snd_strerror(err),
-             err);
-  }
-
-  return false;
-}
-
-bool configure_pcm(snd_pcm_t* pcm,
-                   snd_pcm_stream_t stream,
-                   unsigned int sample_rate,
-                   unsigned int channels) {
-  snd_pcm_hw_params_t* params = nullptr;
-  snd_pcm_hw_params_alloca(&params);
-
-  int err = snd_pcm_hw_params_any(pcm, params);
-  if (err < 0) {
-    LOG_WARN("ALSA hw params init failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  err = snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_RW_INTERLEAVED);
-  if (err < 0) {
-    LOG_WARN("ALSA set access failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  err = snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_S16_LE);
-  if (err < 0) {
-    LOG_WARN("ALSA set format S16_LE failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  unsigned int actual_rate = sample_rate;
-  err                      = snd_pcm_hw_params_set_rate_near(pcm, params, &actual_rate, nullptr);
-  if (err < 0) {
-    LOG_WARN("ALSA set rate failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  err = snd_pcm_hw_params_set_channels(pcm, params, channels);
-  if (err < 0) {
-    LOG_WARN("ALSA set channels failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  snd_pcm_uframes_t period = static_cast<snd_pcm_uframes_t>(kPeriodFrames);
-  (void)snd_pcm_hw_params_set_period_size_near(pcm, params, &period, nullptr);
-
-  err = snd_pcm_hw_params(pcm, params);
-  if (err < 0) {
-    LOG_WARN("ALSA apply hw params failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  err = snd_pcm_prepare(pcm);
-  if (err < 0) {
-    LOG_WARN("ALSA prepare failed: {}", snd_strerror(err));
-    return false;
-  }
-
-  (void)stream;
-  return true;
-}
-
-bool write_pcm_frames(snd_pcm_t* pcm,
-                      const int16_t* samples,
-                      size_t frames,
-                      unsigned int channels) {
-  size_t written = 0;
-  while (written < frames) {
-    const snd_pcm_sframes_t rc =
-        snd_pcm_writei(pcm, samples + written * channels, frames - written);
-    if (rc == -EPIPE) {
-      snd_pcm_prepare(pcm);
-      continue;
-    }
-    if (rc < 0) {
-      const int recovered = snd_pcm_recover(pcm, static_cast<int>(rc), 1);
-      if (recovered < 0) {
-        LOG_WARN("ALSA playback write failed: {}", snd_strerror(static_cast<int>(rc)));
-        return false;
-      }
-      continue;
-    }
-    written += static_cast<size_t>(rc);
-  }
-
-  return true;
-}
-
-bool playback_wav(const WavData& wav) {
-  snd_pcm_t* pcm = nullptr;
-  std::string opened_device;
-  if (!open_pcm_from_candidates(&pcm,
-                                SND_PCM_STREAM_PLAYBACK,
-                                playback_device_candidates(),
-                                opened_device)) {
-    LOG_WARN("ALSA playback open failed: no usable device");
-    return false;
-  }
-
-  std::unique_ptr<snd_pcm_t, decltype(&snd_pcm_close)> pcm_guard(pcm, snd_pcm_close);
-  if (!configure_pcm(pcm, SND_PCM_STREAM_PLAYBACK, wav.sample_rate, wav.channels)) {
-    LOG_WARN("ALSA playback configure failed for {}", opened_device);
-    return false;
-  }
-
-  const size_t frame_bytes = wav.channels * wav.bits_per_sample / 8;
-  const size_t frames      = wav.pcm.size() / frame_bytes;
-  const bool ok =
-      write_pcm_frames(pcm, reinterpret_cast<const int16_t*>(wav.pcm.data()), frames, wav.channels);
-  snd_pcm_drain(pcm);
-  return ok;
-}
-
-void capture_loop(std::atomic<bool>& recording,
-                  std::atomic<bool>& record_ok,
-                  const std::string path) {
-  snd_pcm_t* pcm = nullptr;
-  std::string opened_device;
-  if (!open_pcm_from_candidates(&pcm,
-                                SND_PCM_STREAM_CAPTURE,
-                                capture_device_candidates(),
-                                opened_device)) {
-    LOG_WARN("ALSA capture open failed: no usable device");
-    record_ok = false;
-    return;
-  }
-
-  std::unique_ptr<snd_pcm_t, decltype(&snd_pcm_close)> pcm_guard(pcm, snd_pcm_close);
-  if (!configure_pcm(pcm, SND_PCM_STREAM_CAPTURE, kRecordRate, kRecordChannels)) {
-    LOG_WARN("ALSA capture configure failed for {}", opened_device);
-    record_ok = false;
-    return;
-  }
-
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    LOG_WARN("Failed to open audio recording file: {}", path);
-    record_ok = false;
-    return;
-  }
-
-  write_wav_header(out, 0, kRecordRate, kRecordChannels, kBitsPerSample);
-
-  std::vector<int16_t> frames(kPeriodFrames * kRecordChannels);
-  uint32_t data_size = 0;
-  while (recording.load()) {
-    const snd_pcm_sframes_t rc = snd_pcm_readi(pcm, frames.data(), kPeriodFrames);
-    if (rc == -EPIPE) {
-      snd_pcm_prepare(pcm);
-      continue;
-    }
-    if (rc < 0) {
-      const int recovered = snd_pcm_recover(pcm, static_cast<int>(rc), 1);
-      if (recovered < 0) {
-        LOG_WARN("ALSA capture read failed: {}", snd_strerror(static_cast<int>(rc)));
-        record_ok = false;
-        break;
-      }
-      continue;
-    }
-    if (rc == 0) {
-      continue;
-    }
-
-    const size_t bytes = static_cast<size_t>(rc) * kRecordChannels * sizeof(int16_t);
-    out.write(reinterpret_cast<const char*>(frames.data()), static_cast<std::streamsize>(bytes));
-    data_size += static_cast<uint32_t>(bytes);
-  }
-
-  snd_pcm_drop(pcm);
-  write_wav_header(out, data_size, kRecordRate, kRecordChannels, kBitsPerSample);
-  out.close();
-  LOG_INFO("Audio recording finalized: {}", path);
-}
-#endif
 
 }  // namespace
 
 struct AudioService::Impl {
-  std::thread playback_thread;
-  std::thread record_thread;
-  std::atomic<bool> recording{false};
-  std::atomic<bool> record_ok{true};
+  ma_context context{};
+  bool context_initialized{false};
+  std::string playback_name;
+  std::string capture_name;
 
-  ~Impl() {
-    stop_recording();
-    if (playback_thread.joinable()) {
-      playback_thread.join();
+  ma_device playback_device{};
+  bool playback_initialized{false};
+  bool playback_started{false};
+  std::shared_ptr<AudioData> click_audio;
+  std::shared_ptr<AudioData> shutter_audio;
+  std::shared_ptr<AudioData> active_audio;
+  std::atomic<size_t> playback_frame_offset{0};
+  std::atomic<bool> playback_active{false};
+  std::mutex playback_mutex;
+
+  ma_device capture_device{};
+  bool capture_initialized{false};
+  bool capture_started{false};
+  std::mutex capture_mutex;
+  std::vector<int16_t> capture_samples;
+  std::string capture_path;
+
+  ~Impl() { shutdown(); }
+
+  static void playback_callback(ma_device* device,
+                                void* output,
+                                const void* input,
+                                ma_uint32 frame_count) {
+    (void)input;
+    auto* impl = static_cast<Impl*>(device->pUserData);
+    auto* out  = static_cast<int16_t*>(output);
+    const ma_uint32 output_channels = std::max<ma_uint32>(1, device->playback.channels);
+    if (!out || frame_count == 0) {
+      return;
+    }
+    std::memset(out, 0, static_cast<size_t>(frame_count) * output_channels * sizeof(int16_t));
+    if (!impl || !impl->playback_active.load()) {
+      return;
+    }
+
+    std::shared_ptr<AudioData> audio = std::atomic_load(&impl->active_audio);
+    if (!audio || audio->samples.empty() || audio->channels == 0) {
+      impl->playback_active.store(false);
+      return;
+    }
+
+    const ma_uint32 input_channels = audio->channels;
+    const size_t total_frames      = audio->samples.size() / input_channels;
+    const size_t offset            = impl->playback_frame_offset.load();
+    if (offset >= total_frames) {
+      impl->playback_active.store(false);
+      return;
+    }
+
+    const size_t copy_frames = std::min<size_t>(frame_count, total_frames - offset);
+    for (size_t frame = 0; frame < copy_frames; ++frame) {
+      const size_t input_base  = (offset + frame) * input_channels;
+      const size_t output_base = frame * output_channels;
+      for (ma_uint32 channel = 0; channel < output_channels; ++channel) {
+        const ma_uint32 source_channel =
+            input_channels == 1 ? 0 : std::min(channel, input_channels - 1);
+        out[output_base + channel] = audio->samples[input_base + source_channel];
+      }
+    }
+
+    const size_t next_offset = offset + copy_frames;
+    impl->playback_frame_offset.store(next_offset);
+    if (next_offset >= total_frames) {
+      impl->playback_active.store(false);
     }
   }
 
-  bool play_asset(const char* asset_name) {
-#if USE_DESKTOP
-    LOG_INFO("Audio playback simulator: {}", asset_name);
-    return true;
-#elif !APP_USE_ALSA
-    LOG_WARN("Audio playback unavailable; built without ALSA support: {}", asset_name);
-    return false;
-#else
-    WavData wav;
-    if (!load_wav_asset(asset_name, wav)) {
-      return false;
+  static void capture_callback(ma_device* device,
+                               void* output,
+                               const void* input,
+                               ma_uint32 frame_count) {
+    (void)output;
+    auto* impl = static_cast<Impl*>(device->pUserData);
+    if (!impl || !input || frame_count == 0) {
+      return;
     }
 
-    if (playback_thread.joinable()) {
-      playback_thread.join();
-    }
-
-    playback_thread = std::thread([wav = std::move(wav)]() { (void)playback_wav(wav); });
-    return true;
-#endif
+    const auto* samples = static_cast<const int16_t*>(input);
+    const size_t count  = static_cast<size_t>(frame_count) * kCaptureChannels;
+    std::lock_guard<std::mutex> lock(impl->capture_mutex);
+    impl->capture_samples.insert(impl->capture_samples.end(), samples, samples + count);
   }
 
-  bool play_shutter() { return play_asset(kShutterAsset); }
-
-  bool play_click() { return play_asset(kPressAsset); }
-
-  bool start_recording(const std::string& path) {
-    if (path.empty()) {
-      return false;
-    }
-
-    if (recording.load()) {
+  bool initialize() {
+    if (context_initialized) {
       return true;
     }
 
-#if USE_DESKTOP
-    LOG_INFO("Audio recording simulator started: {}", path);
-    recording = true;
-    record_ok = true;
-    return true;
-#elif !APP_USE_ALSA
-    LOG_WARN("Audio recording unavailable; built without ALSA support: {}", path);
-    record_ok = false;
-    return false;
+#if defined(__linux__)
+    const ma_backend backends[] = {ma_backend_pulseaudio};
+    const ma_result result      = ma_context_init(backends, 1, nullptr, &context);
 #else
-    if (record_thread.joinable()) {
-      record_thread.join();
+    const ma_result result = ma_context_init(nullptr, 0, nullptr, &context);
+#endif
+    if (result != MA_SUCCESS) {
+      LOG_ERROR("Failed to initialize miniaudio context: {}", ma_result_description(result));
+      return false;
+    }
+    context_initialized = true;
+
+    ma_device_info* playback_devices = nullptr;
+    ma_device_info* capture_devices  = nullptr;
+    ma_uint32 playback_count         = 0;
+    ma_uint32 capture_count          = 0;
+    const ma_result enumerate_result = ma_context_get_devices(&context,
+                                                               &playback_devices,
+                                                               &playback_count,
+                                                               &capture_devices,
+                                                               &capture_count);
+    if (enumerate_result != MA_SUCCESS) {
+      LOG_ERROR("Failed to enumerate miniaudio devices: {}",
+                ma_result_description(enumerate_result));
+      shutdown();
+      return false;
     }
 
-    record_ok     = true;
-    recording     = true;
-    record_thread = std::thread([this, path]() { capture_loop(recording, record_ok, path); });
-    LOG_INFO("Audio recording started: {}", path);
+    const auto* playback =
+        select_default_device(playback_devices, playback_count, "sink", context.backend);
+    const auto* capture =
+        select_default_device(capture_devices, capture_count, "source", context.backend);
+    if (!playback || !capture) {
+      shutdown();
+      return false;
+    }
+    playback_name = playback->name;
+    capture_name  = capture->name;
+
+    click_audio   = load_audio_asset(kClickAsset);
+    shutter_audio = load_audio_asset(kShutterAsset);
+    if (!click_audio || !shutter_audio) {
+      shutdown();
+      return false;
+    }
+    if (click_audio->sample_rate != shutter_audio->sample_rate) {
+      LOG_ERROR("Audio assets must use the same sample rate");
+      shutdown();
+      return false;
+    }
+
+    ma_device_config config   = ma_device_config_init(ma_device_type_playback);
+    config.playback.format    = ma_format_s16;
+    config.playback.channels  = kPlaybackChannels;
+    config.playback.shareMode = ma_share_mode_shared;
+    config.sampleRate         = click_audio->sample_rate;
+    config.dataCallback       = playback_callback;
+    config.pUserData          = this;
+    ma_result device_result   = ma_device_init(&context, &config, &playback_device);
+    if (device_result != MA_SUCCESS) {
+      LOG_ERROR("Failed to initialize PulseAudio sink: {}",
+                ma_result_description(device_result));
+      shutdown();
+      return false;
+    }
+    playback_initialized = true;
+
+    device_result = ma_device_start(&playback_device);
+    if (device_result != MA_SUCCESS) {
+      LOG_ERROR("Failed to start PulseAudio sink: {}", ma_result_description(device_result));
+      shutdown();
+      return false;
+    }
+    playback_started = true;
+    LOG_INFO("Audio ready: backend={} sink='{}' source='{}'",
+             ma_get_backend_name(context.backend),
+             playback_name,
+             capture_name);
     return true;
-#endif
+  }
+
+  bool play(const std::shared_ptr<AudioData>& audio) {
+    if (!initialize() || !audio) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(playback_mutex);
+    std::atomic_store(&active_audio, audio);
+    playback_frame_offset.store(0);
+    playback_active.store(true);
+    return true;
+  }
+
+  bool start_recording(const std::string& path) {
+    if (path.empty() || !initialize()) {
+      return false;
+    }
+    if (capture_started) {
+      return true;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      capture_samples.clear();
+      capture_samples.reserve(kCaptureRate * kCaptureChannels * 10);
+      capture_path = path;
+    }
+
+    ma_device_config config   = ma_device_config_init(ma_device_type_capture);
+    config.capture.format     = ma_format_s16;
+    config.capture.channels   = kCaptureChannels;
+    config.capture.shareMode  = ma_share_mode_shared;
+    config.sampleRate         = kCaptureRate;
+    config.dataCallback       = capture_callback;
+    config.pUserData          = this;
+    ma_result result          = ma_device_init(&context, &config, &capture_device);
+    if (result != MA_SUCCESS) {
+      LOG_ERROR("Failed to initialize PulseAudio source: {}", ma_result_description(result));
+      return false;
+    }
+    capture_initialized = true;
+
+    result = ma_device_start(&capture_device);
+    if (result != MA_SUCCESS) {
+      LOG_ERROR("Failed to start PulseAudio source: {}", ma_result_description(result));
+      ma_device_uninit(&capture_device);
+      capture_initialized = false;
+      return false;
+    }
+    capture_started = true;
+    LOG_INFO("Audio recording started: {} source='{}'", path, capture_name);
+    return true;
   }
 
   bool stop_recording() {
-    if (!recording.load()) {
-      if (record_thread.joinable()) {
-        record_thread.join();
-      }
-      return record_ok.load();
+    if (capture_started) {
+      ma_device_stop(&capture_device);
+      capture_started = false;
+    }
+    if (capture_initialized) {
+      ma_device_uninit(&capture_device);
+      capture_initialized = false;
     }
 
-    recording = false;
-    if (record_thread.joinable()) {
-      record_thread.join();
+    std::vector<int16_t> samples;
+    std::string path;
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      samples = std::move(capture_samples);
+      path    = std::move(capture_path);
     }
+    if (path.empty()) {
+      return true;
+    }
+    const bool saved = write_wav_file(path, samples);
+    LOG_INFO("Audio recording stopped: {} samples={} saved={}", path, samples.size(), saved);
+    return saved;
+  }
 
-#if USE_DESKTOP
-    LOG_INFO("Audio recording simulator stopped");
-#elif !APP_USE_ALSA
-    LOG_WARN("Audio recording stopped without ALSA support");
-#else
-    LOG_INFO("Audio recording stopped");
-#endif
-    return record_ok.load();
+  void shutdown() {
+    playback_active.store(false);
+    (void)stop_recording();
+    if (playback_started) {
+      ma_device_stop(&playback_device);
+      playback_started = false;
+    }
+    if (playback_initialized) {
+      ma_device_uninit(&playback_device);
+      playback_initialized = false;
+    }
+    std::atomic_store(&active_audio, std::shared_ptr<AudioData>{});
+    click_audio.reset();
+    shutter_audio.reset();
+    if (context_initialized) {
+      ma_context_uninit(&context);
+      context_initialized = false;
+    }
   }
 };
 
@@ -480,63 +426,52 @@ void AudioService::start() {
   if (state_ == AudioServiceState::Recording) {
     return;
   }
-
+  if (!impl_->initialize()) {
+    state_          = AudioServiceState::Error;
+    status_message_ = "Audio unavailable";
+    return;
+  }
   state_          = AudioServiceState::Ready;
   status_message_ = "Audio ready";
-  LOG_INFO("Audio service ready");
 }
 
 void AudioService::stop() {
-  if (impl_ && state_ == AudioServiceState::Recording) {
-    impl_->stop_recording();
+  if (impl_) {
+    impl_->shutdown();
   }
-
   state_          = AudioServiceState::Idle;
   status_message_ = "Audio idle";
   recording_path_.clear();
-  LOG_INFO("Audio service stopped");
 }
 
 void AudioService::update(uint32_t /*delta_ms*/) {}
 
 bool AudioService::play_shutter() {
   ensure_impl_();
-  if (state_ == AudioServiceState::Idle) {
-    start();
-  }
-
-  const bool ok   = impl_->play_shutter();
+  const bool ok = impl_->initialize() && impl_->play(impl_->shutter_audio);
+  state_          = ok ? AudioServiceState::Ready : AudioServiceState::Error;
   status_message_ = ok ? "Shutter sound played" : "Shutter sound unavailable";
   return ok;
 }
 
 bool AudioService::play_click() {
   ensure_impl_();
-  if (state_ == AudioServiceState::Idle) {
-    start();
-  }
-
-  const bool ok   = impl_->play_click();
+  const bool ok = impl_->initialize() && impl_->play(impl_->click_audio);
+  state_          = ok ? AudioServiceState::Ready : AudioServiceState::Error;
   status_message_ = ok ? "Click sound played" : "Click sound unavailable";
   return ok;
 }
 
 bool AudioService::start_recording(const std::string& path) {
   ensure_impl_();
-  if (state_ == AudioServiceState::Idle) {
-    start();
-  }
-
   if (state_ == AudioServiceState::Recording) {
     return true;
   }
-
   if (!impl_->start_recording(path)) {
     state_          = AudioServiceState::Error;
     status_message_ = "Audio recording failed";
     return false;
   }
-
   recording_path_ = path;
   state_          = AudioServiceState::Recording;
   status_message_ = "Audio recording";
@@ -547,7 +482,6 @@ bool AudioService::stop_recording() {
   if (state_ != AudioServiceState::Recording) {
     return true;
   }
-
   ensure_impl_();
   const bool ok   = impl_->stop_recording();
   state_          = ok ? AudioServiceState::Ready : AudioServiceState::Error;

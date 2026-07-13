@@ -41,7 +41,7 @@ class BaseViewModel {
   /**
    * @brief Optional screen update hook.
    */
-  virtual void update(uint32_t delta_ms) {}
+  virtual void update(uint32_t /*delta_ms*/) {}
 
   /**
    * @brief Handle an application action converted by the input layer.
@@ -49,7 +49,7 @@ class BaseViewModel {
    * Global actions can be intercepted at the entry layer; page-specific actions are consumed by the
    * current ViewModel.
    */
-  virtual bool handle_action(app::AppAction action) { return false; }
+  virtual bool handle_action(app::AppAction /*action*/) { return false; }
 
   app::AppState consume_transition_request() {
     app::AppState requested = pending_transition_;

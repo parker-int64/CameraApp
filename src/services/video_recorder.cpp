@@ -139,11 +139,11 @@ bool encode_jpeg_rgb888(const std::vector<uint8_t>& rgb,
 #endif
 }
 
-std::vector<uint8_t> rgb565_frame_to_rgb888(const CameraFrame& frame) {
-  std::vector<uint8_t> rgb;
+bool rgb565_frame_to_rgb888(const CameraFrame& frame, std::vector<uint8_t>& rgb) {
   if (frame.width <= 0 || frame.height <= 0 ||
       frame.rgb565.size() < static_cast<size_t>(frame.width * frame.height)) {
-    return rgb;
+    rgb.clear();
+    return false;
   }
 
   rgb.assign(static_cast<size_t>(frame.width) * frame.height * 3, 0);
@@ -156,7 +156,7 @@ std::vector<uint8_t> rgb565_frame_to_rgb888(const CameraFrame& frame) {
     rgb[static_cast<size_t>(i) * 3 + 1] = g;
     rgb[static_cast<size_t>(i) * 3 + 2] = b;
   }
-  return rgb;
+  return true;
 }
 
 }  // namespace
@@ -293,7 +293,10 @@ bool MjpegAviWriter::write_header() {
 }
 
 bool MjpegAviWriter::write_rgb565_frame(const CameraFrame& frame, int quality) {
-  return write_rgb888_frame(rgb565_frame_to_rgb888(frame), frame.width, frame.height, quality);
+  if (!rgb565_frame_to_rgb888(frame, rgb_buffer_)) {
+    return false;
+  }
+  return write_rgb888_frame(rgb_buffer_, frame.width, frame.height, quality);
 }
 
 bool MjpegAviWriter::write_rgb888_frame(const std::vector<uint8_t>& rgb,
@@ -304,11 +307,11 @@ bool MjpegAviWriter::write_rgb888_frame(const std::vector<uint8_t>& rgb,
     return false;
   }
 
-  std::vector<uint8_t> jpeg;
-  if (!encode_jpeg_rgb888(rgb, width, height, std::max(1, std::min(quality, 100)), jpeg)) {
+  if (!encode_jpeg_rgb888(
+          rgb, width, height, std::max(1, std::min(quality, 100)), jpeg_buffer_)) {
     return false;
   }
-  return write_jpeg_frame(jpeg);
+  return write_jpeg_frame(jpeg_buffer_);
 }
 
 bool MjpegAviWriter::write_jpeg_frame(const std::vector<uint8_t>& jpeg) {

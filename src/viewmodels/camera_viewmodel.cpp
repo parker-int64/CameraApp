@@ -26,10 +26,9 @@ void CameraViewModel::update(uint32_t delta_ms) {
 
   services_->camera->update(delta_ms);
 
-  service::CameraFrame frame;
+  service::CameraFramePtr frame;
   if (services_->camera->consume_frame(frame)) {
     latest_frame_ = std::move(frame);
-    new_frame_    = true;
   }
 
   std::string path;
@@ -42,8 +41,7 @@ void CameraViewModel::update(uint32_t delta_ms) {
 
 bool CameraViewModel::handle_action(app::AppAction action) {
   if (action == app::AppAction::ToggleHint) {
-    shortcut_hint_visible_ = !shortcut_hint_visible_;
-    return true;
+    return false;
   }
 
   if (action == app::AppAction::OpenGallery) {
@@ -90,13 +88,12 @@ bool CameraViewModel::handle_action(app::AppAction action) {
   return false;
 }
 
-bool CameraViewModel::consume_frame(service::CameraFrame& frame) {
-  if (!new_frame_) {
+bool CameraViewModel::consume_frame(service::CameraFramePtr& frame) {
+  if (!latest_frame_) {
     return false;
   }
 
-  frame      = latest_frame_;
-  new_frame_ = false;
+  frame      = std::move(latest_frame_);
   return true;
 }
 

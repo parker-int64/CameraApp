@@ -385,6 +385,12 @@ bool convert_frame_to_outputs(const std::vector<const uint8_t*>& planes,
     return false;
   }
 
+  if (!is_still && preview_frame) {
+    preview_frame->width  = width;
+    preview_frame->height = height;
+    preview_frame->rgb565.resize(static_cast<size_t>(width) * height);
+  }
+
   if (format == PixelFormat::YUV420) {
     return convert_yuv420_frame(planes,
                                 bytes_used,

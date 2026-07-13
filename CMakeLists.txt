@@ -21,8 +21,6 @@ set(APP_KEY_INPUT_DEVICE "" CACHE STRING "Optional Linux evdev keyboard/keypad d
 set(APP_FRAMEBUFFER_DEVICE "/dev/fb0" CACHE STRING "Linux framebuffer device path used by embedded builds")
 set(APP_DRM_DEVICE "/dev/dri/card0" CACHE STRING "Linux DRM device path used when APP_USE_DRM=ON")
 set(APP_DRM_CONNECTOR_ID "-1" CACHE STRING "DRM connector id used when APP_USE_DRM=ON; -1 auto-selects")
-set(APP_ALSA_PLAYBACK_DEVICE "" CACHE STRING "Optional ALSA playback PCM device, e.g. plughw:0,0")
-set(APP_ALSA_CAPTURE_DEVICE "" CACHE STRING "Optional ALSA capture PCM device, e.g. plughw:0,0")
 set(APP_USE_DRM OFF CACHE BOOL "Enable LVGL Linux DRM/KMS backend for embedded Linux builds")
 set(CM0_ALLOW_FETCH_DEPS ON CACHE BOOL "Allow downloading missing CM0 BSP/dependencies during cross builds")
 
@@ -110,6 +108,19 @@ if(USE_DESKTOP)
     if(NOT TARGET PNG::PNG)
         find_package(PNG REQUIRED)
     endif()
+
+    find_path(MINIAUDIO_INCLUDE_DIR
+        NAMES miniaudio.h
+        HINTS "${CMAKE_CURRENT_SOURCE_DIR}/.cache/sdk_bsp-src/usr/include"
+    )
+    if(NOT MINIAUDIO_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "miniaudio.h was not found; provide it in .cache/sdk_bsp-src/usr/include"
+        )
+    endif()
+    list(APPEND APP_DEP_INCLUDE_DIRS "${MINIAUDIO_INCLUDE_DIR}")
+    list(APPEND APP_DEP_LIBS ${CMAKE_DL_LIBS})
+    message(STATUS "miniaudio backend enabled")
 
     find_package(JPEG CONFIG QUIET)
     if(NOT TARGET JPEG::JPEG)
@@ -290,12 +301,13 @@ else()
     endif()
     camera_app_add_imported_library(ZLIB::ZLIB "${ZLIB_LIBRARY}" "${ZLIB_INCLUDE_DIR}")
 
-    cm0_find_header(ALSA_INCLUDE_DIR alsa/asoundlib.h "${CM0_SYSROOT}/usr/include")
-    cm0_find_library(ALSA_LIBRARY asound libasound.so libasound.so.2)
-    if(NOT ALSA_INCLUDE_DIR OR NOT ALSA_LIBRARY)
-        message(FATAL_ERROR "Missing required ALSA header/library in BSP sysroot: ${CM0_SYSROOT}")
+    cm0_find_header(MINIAUDIO_INCLUDE_DIR miniaudio.h
+        "${CM0_SYSROOT}/usr/include"
+        "${CM0_SDK_ROOT}/usr/include"
+    )
+    if(NOT MINIAUDIO_INCLUDE_DIR)
+        message(FATAL_ERROR "miniaudio.h was not found in the CM0 SDK sysroot")
     endif()
-    camera_app_add_imported_library(CM0::ALSA "${ALSA_LIBRARY}" "${ALSA_INCLUDE_DIR}")
 
     cm0_find_header(LIBCAMERA_INCLUDE_DIR libcamera/camera.h "${CM0_SYSROOT}/usr/include")
     cm0_find_library(LIBCAMERA_LIBRARY camera libcamera.so)
@@ -343,11 +355,15 @@ else()
 
     cm0_find_library(PTHREAD_LIBRARY pthread libpthread.so.0 libpthread.a)
     cm0_find_library(M_LIBRARY m libm.so libm.so.6 libm.a)
+    cm0_find_library(DL_LIBRARY dl libdl.so libdl.so.2 libdl.a)
     if(NOT PTHREAD_LIBRARY)
         message(FATAL_ERROR "Missing required pthread library in BSP sysroot: ${CM0_SYSROOT}")
     endif()
     if(NOT M_LIBRARY)
         message(FATAL_ERROR "Missing required math library in BSP sysroot: ${CM0_SYSROOT}")
+    endif()
+    if(NOT DL_LIBRARY)
+        message(FATAL_ERROR "Missing required dl library in BSP sysroot: ${CM0_SYSROOT}")
     endif()
 
     if(APP_USE_DRM)
@@ -369,17 +385,17 @@ else()
 
     list(APPEND APP_DEP_INCLUDE_DIRS
         ${CM0_MULTIARCH_INCLUDE_DIRS}
-        ${ALSA_INCLUDE_DIR}
+        ${MINIAUDIO_INCLUDE_DIR}
         ${LIBCAMERA_INCLUDE_DIR}
         ${LIBV4L2_INCLUDE_DIR}
     )
     list(APPEND APP_DEP_LIBS
-        CM0::ALSA
         CM0::Libcamera
         CM0::LibcameraBase
         CM0::V4L2
         ${PTHREAD_LIBRARY}
         ${M_LIBRARY}
+        ${DL_LIBRARY}
     )
 
     set(LVGL_INCLUDE_DIRS ${FREETYPE_INCLUDE_DIR} ${PNG_INCLUDE_DIR} ${JPEG_INCLUDE_DIR} ${ZLIB_INCLUDE_DIR})
@@ -434,9 +450,7 @@ add_library(${PROJECT_NAME}_services STATIC
 target_include_directories(${PROJECT_NAME}_services PUBLIC ${APP_COMMON_INCLUDE_DIRS})
 target_compile_definitions(${PROJECT_NAME}_services PUBLIC
     USE_DESKTOP=$<BOOL:${USE_DESKTOP}>
-    APP_USE_ALSA=1
-    APP_ALSA_PLAYBACK_DEVICE="${APP_ALSA_PLAYBACK_DEVICE}"
-    APP_ALSA_CAPTURE_DEVICE="${APP_ALSA_CAPTURE_DEVICE}"
+    APP_MINIAUDIO_HEADER="${MINIAUDIO_INCLUDE_DIR}/miniaudio.h"
 )
 target_link_libraries(${PROJECT_NAME}_services PUBLIC ${PROJECT_NAME}_utils ${APP_DEP_LIBS})
 

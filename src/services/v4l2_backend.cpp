@@ -130,7 +130,7 @@ std::vector<std::string> device_candidates() {
   std::vector<int> video_indices;
   if (DIR* dir = ::opendir("/dev")) {
     while (dirent* entry = ::readdir(dir)) {
-      const std::string name = entry->d_name ? entry->d_name : "";
+      const std::string name = entry->d_name;
       if (name.rfind("video", 0) != 0 || name.size() <= 5) {
         continue;
       }
@@ -710,7 +710,8 @@ struct V4l2Backend::Impl {
   CameraResolution capture_resolution{kDefaultCaptureWidth, kDefaultCaptureHeight};
   CameraZoomState zoom_state{};
   CameraFrame latest_frame;
-  bool new_frame{false};
+  int latest_frame_width{0};
+  int latest_frame_height{0};
   std::vector<uint8_t> latest_rgb;
   CaptureState capture_state{CaptureState::Idle};
   VideoState video_state{VideoState::Idle};
@@ -1108,7 +1109,7 @@ struct V4l2Backend::Impl {
     }
   }
 
-  bool consume_frame(CameraFrame& frame) {
+  bool consume_frame(CameraFramePtr& frame) {
     if (!opened || !streaming || buffers.empty()) {
       return false;
     }
@@ -1118,11 +1119,6 @@ struct V4l2Backend::Impl {
     pfd.events            = POLLIN;
     const int poll_result = poll(&pfd, 1, 0);
     if (poll_result <= 0) {
-      if (new_frame) {
-        frame     = latest_frame;
-        new_frame = false;
-        return true;
-      }
       return false;
     }
 
@@ -1142,8 +1138,9 @@ struct V4l2Backend::Impl {
     if (!converted) {
       return false;
     }
-    frame     = latest_frame;
-    new_frame = false;
+    latest_frame_width  = latest_frame.width;
+    latest_frame_height = latest_frame.height;
+    frame     = std::make_shared<CameraFrame>(std::move(latest_frame));
     return true;
   }
 
@@ -1310,7 +1307,7 @@ struct V4l2Backend::Impl {
   }
 
   bool start_video_recording(int fps, int quality) {
-    if (!opened || latest_frame.width <= 0 || latest_frame.height <= 0) {
+    if (!opened || latest_frame_width <= 0 || latest_frame_height <= 0) {
       video_state      = VideoState::Failed;
       last_error_value = "V4L2 stream is not ready for video recording";
       return false;
@@ -1322,8 +1319,8 @@ struct V4l2Backend::Impl {
     last_video_path_value = make_video_path();
     video_quality         = clamp_int(quality, 1, 100);
     if (!video_writer.open(last_video_path_value,
-                           latest_frame.width,
-                           latest_frame.height,
+                           latest_frame_width,
+                           latest_frame_height,
                            std::max(1, fps))) {
       video_state = VideoState::Failed;
       return false;
@@ -1407,7 +1404,7 @@ void V4l2Backend::close() {
 #endif
 }
 
-bool V4l2Backend::consume_frame(CameraFrame& frame) {
+bool V4l2Backend::consume_frame(CameraFramePtr& frame) {
 #if USE_DESKTOP
   (void)frame;
   return false;

@@ -34,7 +34,9 @@ class Screen {
         viewmodel_(std::move(viewmodel_ptr)) {}
 
   virtual ~Screen() {
-    on_exit();
+    if (active_) {
+      on_exit();
+    }
     view_.reset();
   }
 
@@ -47,7 +49,11 @@ class Screen {
    * @brief Show the screen.
    */
   virtual void show() {
+    if (active_) {
+      return;
+    }
     on_enter();
+    active_ = true;
     if (view_) {
       view_->show();
     }
@@ -57,10 +63,14 @@ class Screen {
    * @brief Hide the screen.
    */
   virtual void hide() {
+    if (!active_) {
+      return;
+    }
     if (view_) {
       view_->hide();
     }
     on_exit();
+    active_ = false;
   }
 
   /**
@@ -109,6 +119,7 @@ class Screen {
   lv_obj_t* parent_{nullptr};
   std::unique_ptr<view::BaseView> view_;
   std::shared_ptr<viewmodel::BaseViewModel> viewmodel_;
+  bool active_{false};
 };
 
 }  // namespace screen

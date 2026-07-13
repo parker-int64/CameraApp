@@ -20,6 +20,8 @@ struct CameraFrame {
   std::vector<uint16_t> rgb565;
 };
 
+using CameraFramePtr = std::shared_ptr<const CameraFrame>;
+
 struct CameraResolution {
   int width{0};
   int height{0};
@@ -52,7 +54,7 @@ class CameraService : public BaseService {
   std::string active_backend_name() const;
   void set_backend_preference(CameraBackendPreference preference);
   CameraBackendPreference toggle_backend_preference();
-  bool consume_frame(CameraFrame& frame);
+  bool consume_frame(CameraFramePtr& frame);
   bool request_capture();
   bool start_video_recording(int fps = 15, int quality = 80);
   bool stop_video_recording();
@@ -76,8 +78,7 @@ class CameraService : public BaseService {
   std::string status_message_{"Camera idle"};
   std::unique_ptr<CameraInterface> backend_;
   CameraBackendPreference backend_preference_{CameraBackendPreference::Csi};
-  CameraFrame latest_frame_;
-  bool new_frame_{false};
+  CameraFramePtr latest_frame_;
   bool preview_ready_{false};
   CaptureState capture_state_{CaptureState::Idle};
   std::string last_capture_path_;

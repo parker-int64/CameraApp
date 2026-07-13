@@ -28,9 +28,6 @@ namespace font  = ui::font;
 
 namespace {
 
-constexpr int32_t kShortcutHintStartOffsetY    = 14;
-constexpr uint32_t kShortcutHintAnimDurationMs = 260;
-constexpr uint32_t kShortcutHintStaggerMs      = 35;
 constexpr int32_t kBottomIconLiftY             = -6;
 constexpr int32_t kBottomIconGuideLineHeight   = 6;
 constexpr uint32_t kCaptureStatusVisibleMs     = 2800;
@@ -39,14 +36,6 @@ constexpr int32_t kPreviewHeight               = 170;
 constexpr int32_t kZoomNavigatorWidth          = 64;
 constexpr int32_t kZoomNavigatorHeight         = 48;
 constexpr int32_t kZoomNavigatorPadding        = 4;
-
-void shortcut_hint_opa_anim_cb(void* obj, int32_t value) {
-  lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value), 0);
-}
-
-void shortcut_hint_translate_y_anim_cb(void* obj, int32_t value) {
-  lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), value, 0);
-}
 
 void flash_opa_anim_cb(void* obj, int32_t value) {
   lv_obj_set_style_bg_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value), 0);
@@ -93,11 +82,6 @@ void CameraView::build_() {
   build_container_();
   build_preview_();
   build_zoom_navigator_();
-  build_top_container_();
-
-  /* create top-left help keypad icon and text */
-  // build_help_icon_keypad_();
-
   build_bottom_container_();
 
   /* create return icon button/keypad */
@@ -114,26 +98,27 @@ void CameraView::build_() {
   build_flash_overlay_();
 }
 
-void CameraView::set_preview_frame(const service::CameraFrame& frame) {
+void CameraView::set_preview_frame(service::CameraFramePtr frame) {
   if (freeze_preview_until_ms_ &&
       static_cast<int32_t>(lv_tick_get() - freeze_preview_until_ms_) < 0) {
     return;
   }
   freeze_preview_until_ms_ = 0;
 
-  if (!preview_image_ || frame.width <= 0 || frame.height <= 0 || frame.rgb565.empty()) {
+  if (!preview_image_ || !frame || frame->width <= 0 || frame->height <= 0 ||
+      frame->rgb565.empty()) {
     return;
   }
 
-  preview_buffer_            = frame.rgb565;
+  preview_frame_             = std::move(frame);
   preview_dsc_.header.magic  = LV_IMAGE_HEADER_MAGIC;
   preview_dsc_.header.cf     = LV_COLOR_FORMAT_RGB565;
   preview_dsc_.header.flags  = 0;
-  preview_dsc_.header.w      = static_cast<uint32_t>(frame.width);
-  preview_dsc_.header.h      = static_cast<uint32_t>(frame.height);
-  preview_dsc_.header.stride = static_cast<uint32_t>(frame.width * sizeof(uint16_t));
-  preview_dsc_.data_size     = static_cast<uint32_t>(preview_buffer_.size() * sizeof(uint16_t));
-  preview_dsc_.data          = reinterpret_cast<const uint8_t*>(preview_buffer_.data());
+  preview_dsc_.header.w      = static_cast<uint32_t>(preview_frame_->width);
+  preview_dsc_.header.h      = static_cast<uint32_t>(preview_frame_->height);
+  preview_dsc_.header.stride = static_cast<uint32_t>(preview_frame_->width * sizeof(uint16_t));
+  preview_dsc_.data_size = static_cast<uint32_t>(preview_frame_->rgb565.size() * sizeof(uint16_t));
+  preview_dsc_.data = reinterpret_cast<const uint8_t*>(preview_frame_->rgb565.data());
 
   lv_image_set_src(preview_image_, &preview_dsc_);
   lv_obj_invalidate(preview_image_);
@@ -341,10 +326,6 @@ lv_obj_t* CameraView::build_container_(lv_align_t align, size_t width, size_t he
   return c;
 }
 
-void CameraView::build_top_container_() {
-  tool_top_ = build_container_(LV_ALIGN_TOP_MID, LV_PCT(100), 80);
-}
-
 void CameraView::build_bottom_container_() {
   tool_bottom_ = build_container_(LV_ALIGN_BOTTOM_MID, LV_PCT(100), 40);
 }
@@ -390,34 +371,6 @@ IconKeypad CameraView::build_icon_(int32_t icon_size,
   lv_obj_align_to(guide_line, icon_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
 
   return {icon_btn, icon_label};
-}
-
-void CameraView::build_help_icon_keypad_() {
-  /* Create a modal container */
-  lv_obj_t* modal = lv_obj_create(tool_top_);
-  lv_obj_set_size(modal, 80, 36);
-  lv_obj_set_style_border_opa(modal, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(modal, 18, 0);
-  lv_obj_set_style_bg_color(modal, lv_color_hex(color::DARK_ONSURFACE), 0);
-  lv_obj_set_style_pad_all(modal, 0, 0);
-  lv_obj_set_style_pad_gap(modal, 5, 0);
-  lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_bg_opa(modal, LV_OPA_30, 0);
-  lv_obj_set_align(modal, LV_ALIGN_TOP_LEFT);
-
-  /* Create keypad icon label */
-  lv_obj_t* keypad_label = lv_label_create(modal);
-  lv_obj_set_style_text_color(keypad_label, lv_color_white(), 0);
-  lv_obj_set_style_text_font(keypad_label, Font::keyboard_icons(32), 0);
-  lv_obj_set_style_translate_y(keypad_label, -3, 0);
-  lv_label_set_text(keypad_label, font::KEYBOARD_1);
-
-  /* Create help text */
-  help_label_ = lv_label_create(modal);
-  lv_obj_set_style_text_color(help_label_, lv_color_white(), 0);
-  lv_obj_set_style_text_font(help_label_, Font::inter_bold(16), 0);
-  lv_label_set_text(help_label_, "Help");
 }
 
 }  // namespace view
