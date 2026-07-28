@@ -141,7 +141,6 @@ jobs:
         run: |
           ./package_deb.sh \
             -DCAMERA_APP_VERSION="${VERSION}" \
-            -DAPP_DISPLAY_NAME=CameraApp \
             -DCM0_SDK_ROOT="${GITHUB_WORKSPACE}/.cache/sdk_bsp-src" \
             -DCMAKE_SYSROOT="${GITHUB_WORKSPACE}/.cache/sdk_bsp-src" \
             -DCM0_ALLOW_FETCH_DEPS=OFF
