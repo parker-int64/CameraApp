@@ -149,7 +149,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          package="dist/Camera_${VERSION}_m5stack1_arm64.deb"
+          package="dist/CameraApp_${VERSION}_m5stack1_arm64.deb"
           test -f "${package}"
           test "$(dpkg-deb --field "${package}" Architecture)" = "arm64"
           test "$(dpkg-deb --field "${package}" Version)" = "${VERSION}-m5stack1"
