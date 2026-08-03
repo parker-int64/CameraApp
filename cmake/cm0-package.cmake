@@ -102,7 +102,7 @@ set(APP_DEBIAN_PACKAGE_DEPENDS
     libfmt10
     "libcamera0.7 | libcamera0.6 | libcamera0.5 | libcamera0.4 | libcamera0.3 | libcamera0.2 | libcamera0"
     libcamera-ipa
-    libasound2
+    libpulse0
     libcjson1
     libv4l-0
 )

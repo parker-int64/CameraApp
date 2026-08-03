@@ -25,12 +25,13 @@ CM0 cross builds use `cmake/toolchains/cp0-aarch64-linux-gnu.cmake`. The default
 
 ## Dependencies
 
-Desktop preview uses SDL/LVGL and does not enable the CM0 framebuffer/DRM, libcamera, or ALSA runtime backends.
+Desktop preview uses SDL/LVGL and miniaudio. On Linux, miniaudio uses the PulseAudio backend.
 
 ```bash
 sudo apt install -y \
   build-essential cmake git pkg-config dpkg-dev \
-  libsdl2-dev libfreetype-dev libpng-dev libjpeg-dev zlib1g-dev
+  libsdl2-dev libfreetype-dev libpng-dev libjpeg-dev zlib1g-dev \
+  libminiaudio-dev libpulse0
 ```
 
 For CM0 / arm64 cross builds, all CameraApp dependencies are required except DRM. fbdev is the default display backend; enable DRM only with `-DAPP_USE_DRM=ON`.
@@ -45,13 +46,13 @@ sudo apt install -y \
   libpng-dev:arm64 \
   libjpeg-dev:arm64 \
   zlib1g-dev:arm64 \
-  libasound2-dev:arm64 \
   libcamera-dev:arm64 \
   libfmt-dev:arm64 \
   libcjson-dev:arm64
 ```
 
-Install `libdrm-dev:arm64` only when building with `APP_USE_DRM=ON`.
+The CM0 SDK sysroot must provide `usr/include/miniaudio.h`; the target runtime requires
+`libpulse0`. Install `libdrm-dev:arm64` only when building with `APP_USE_DRM=ON`.
 
 ## Build
 
@@ -92,7 +93,7 @@ cmake --preset cp0-cross -DAPP_USE_DRM=ON
 `CAMERA_APP_VERSION` can override the package version without editing `CMakeLists.txt`:
 
 ```bash
-./package_deb.sh -DCAMERA_APP_VERSION=0.2.2
+./package_deb.sh -DCAMERA_APP_VERSION=0.3.5
 ```
 
 Pushes to `main` run `.github/workflows/release.yml`, increment the patch component of the latest
@@ -106,7 +107,7 @@ also be run manually with an explicit `MAJOR.MINOR.PATCH` version.
 Default output:
 
 ```text
-dist/Camera_0.2.1_m5stack1_arm64.deb
+dist/Camera_0.3.4_m5stack1_arm64.deb
 ```
 
 Useful overrides:
