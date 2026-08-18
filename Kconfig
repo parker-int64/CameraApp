@@ -15,19 +15,6 @@ config CAMERA_APP_USE_DRM
     range 0 1
     default 0
 
-config CAMERA_APP_USE_ALSA
-    int "Enable ALSA audio backend (0/1)"
-    range 0 1
-    default 1
-
-config CAMERA_APP_ALSA_PLAYBACK_DEVICE
-    string "ALSA playback device"
-    default ""
-
-config CAMERA_APP_ALSA_CAPTURE_DEVICE
-    string "ALSA capture device"
-    default ""
-
 config CAMERA_APP_KEY_INPUT_DEVICE
     string "Linux key input device"
     default ""

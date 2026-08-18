@@ -43,7 +43,7 @@ sudo apt install -y \
 
 ### 2. Desktop 本地预览依赖
 
-Desktop 模式用于本机 SDL/LVGL 预览，不会启用 CM0 的 Linux framebuffer/DRM、libcamera 和 ALSA 交叉依赖。
+Desktop 模式用于本机 SDL/LVGL 预览，音频统一使用 miniaudio；Linux 上使用 PulseAudio 后端。
 
 ```bash
 sudo apt install -y \
@@ -51,7 +51,9 @@ sudo apt install -y \
   libfreetype-dev \
   libpng-dev \
   libjpeg-dev \
-  zlib1g-dev
+  zlib1g-dev \
+  libminiaudio-dev \
+  libpulse0
 ```
 
 ### 3. CM0 / arm64 交叉编译依赖
@@ -73,13 +75,15 @@ sudo apt install -y \
   libpng-dev:arm64 \
   libjpeg-dev:arm64 \
   zlib1g-dev:arm64 \
-  libasound2-dev:arm64 \
   libcamera-dev:arm64 \
   libfmt-dev:arm64 \
   libcjson-dev:arm64
 ```
 
-CameraApp 的 CM0 构建中，除 DRM display backend 外，其它依赖都是必需项；CMake 找不到会直接报错。fbdev 是默认 display backend。只有需要 DRM/KMS 时才安装 `libdrm-dev:arm64` 并打开 `APP_USE_DRM`：
+CameraApp 的 CM0 sysroot 必须提供 `usr/include/miniaudio.h`，目标系统运行时需要
+`libpulse0`。除 DRM display backend 外，其它依赖都是必需项；CMake 找不到会直接报错。
+fbdev 是默认 display backend。只有需要 DRM/KMS 时才安装 `libdrm-dev:arm64` 并打开
+`APP_USE_DRM`：
 
 ```bash
 -DAPP_USE_DRM=ON
@@ -133,7 +137,7 @@ cmake --preset cp0-cross -DAPP_USE_DRM=ON
 可以通过 `CAMERA_APP_VERSION` 覆盖包版本，无需修改 `CMakeLists.txt`：
 
 ```bash
-./package_deb.sh -DCAMERA_APP_VERSION=0.2.2
+./package_deb.sh -DCAMERA_APP_VERSION=0.3.5
 ```
 
 推送到 `main` 后，`.github/workflows/release.yml` 会读取最新 GitHub Release，将补丁版本号
@@ -150,7 +154,7 @@ cd /path/to/debian_workspace/projects/CameraApp
 默认输出：
 
 ```text
-dist/Camera_0.2.1_m5stack1_arm64.deb
+dist/Camera_0.3.4_m5stack1_arm64.deb
 ```
 
 可选参数：
@@ -163,7 +167,7 @@ dist/Camera_0.2.1_m5stack1_arm64.deb
 检查包内容：
 
 ```bash
-dpkg-deb -c dist/Camera_0.2.1_m5stack1_arm64.deb
+dpkg-deb -c dist/Camera_0.3.4_m5stack1_arm64.deb
 ```
 
 至少应包含这些路径：
@@ -181,14 +185,14 @@ dpkg-deb -c dist/Camera_0.2.1_m5stack1_arm64.deb
 在目标板安装：
 
 ```bash
-sudo apt install ./dist/Camera_0.2.1_m5stack1_arm64.deb
+sudo apt install ./dist/Camera_0.3.4_m5stack1_arm64.deb
 ```
 
 或者复制到目标板后安装：
 
 ```bash
-scp dist/Camera_0.2.1_m5stack1_arm64.deb pi@pi:~/
-ssh pi@pi 'sudo apt install ./Camera_0.2.1_m5stack1_arm64.deb'
+scp dist/Camera_0.3.4_m5stack1_arm64.deb pi@pi:~/
+ssh pi@pi 'sudo apt install ./Camera_0.3.4_m5stack1_arm64.deb'
 ```
 
 ## 安装后的资源路径
