@@ -21,41 +21,61 @@
 namespace ui::font {
 namespace {
 
-constexpr const char* INTER_REGULAR_FILE  = "inter-regular.ttf";
-constexpr const char* INTER_MEDIUM_FILE   = "inter-medium.ttf";
-constexpr const char* INTER_SEMIBOLD_FILE = "inter-semibold.ttf";
-constexpr const char* INTER_BOLD_FILE     = "inter-bold.ttf";
-constexpr int32_t DEFAULT_FONT_SIZE       = 16;
+constexpr const char* NOTO_SANS_CJK_REGULAR_PATH =
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+constexpr const char* NOTO_SANS_CJK_MEDIUM_PATH =
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc";
+constexpr int32_t DEFAULT_FONT_SIZE = 16;
 
 struct FontSlot {
-  InterWeight weight;
+  StandardFontWeight weight;
   int32_t size;
   lv_font_t* font;
   std::string path;
 };
 
-std::array<FontSlot, 8> font_slots{};
+std::array<FontSlot, 16> font_slots{};
 std::array<FontSlot, 4> keyboard_icon_slots{};
 std::array<FontSlot, 4> camera_icon_slots{};
 bool initialized = false;
 
-const char* file_for_weight(InterWeight weight) {
+const char* path_for_weight(StandardFontWeight weight) {
   switch (weight) {
-    case InterWeight::Medium:
-      return INTER_MEDIUM_FILE;
-    case InterWeight::SemiBold:
-      return INTER_SEMIBOLD_FILE;
-    case InterWeight::Bold:
-      return INTER_BOLD_FILE;
-    case InterWeight::Regular:
+    case StandardFontWeight::Medium:
+      return NOTO_SANS_CJK_MEDIUM_PATH;
+    case StandardFontWeight::Regular:
     default:
-      return INTER_REGULAR_FILE;
+      return NOTO_SANS_CJK_REGULAR_PATH;
   }
 }
 
-std::vector<std::string> asset_paths_for_weight(InterWeight weight) {
-  const std::string file = file_for_weight(weight);
-  return {"fonts/" + file, file};
+std::vector<std::string> paths_for_weight(StandardFontWeight weight) {
+  return {path_for_weight(weight)};
+}
+
+lv_font_t* fallback_font(int32_t size) {
+  if (size <= 10) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_10);
+  }
+  if (size <= 12) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_12);
+  }
+  if (size <= 14) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_14);
+  }
+  if (size <= 16) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_16);
+  }
+  if (size <= 18) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_18);
+  }
+  if (size <= 20) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_20);
+  }
+  if (size <= 24) {
+    return const_cast<lv_font_t*>(&lv_font_montserrat_24);
+  }
+  return const_cast<lv_font_t*>(&lv_font_montserrat_28);
 }
 
 lv_font_t* create_freetype_font(const std::vector<std::string>& asset_paths,
@@ -76,6 +96,7 @@ lv_font_t* create_freetype_font(const std::vector<std::string>& asset_paths,
     }
 
     path = candidate_path;
+    font->fallback = fallback_font(size);
     LOG_DEBUG("Created FreeType font from asset: {}", path);
     return font;
   }
@@ -96,8 +117,6 @@ lv_font_t* create_freetype_font(const std::vector<std::string>& asset_paths,
   return nullptr;
 #endif
 }
-
-lv_font_t* fallback_font() { return const_cast<lv_font_t*>(&lv_font_montserrat_14); }
 
 }  // namespace
 
@@ -137,7 +156,7 @@ void AppFont::deinit() {
   initialized = false;
 }
 
-lv_font_t* AppFont::inter(InterWeight weight, int32_t size) {
+lv_font_t* AppFont::standard(StandardFontWeight weight, int32_t size) {
   init();
 
   if (size <= 0) {
@@ -154,13 +173,13 @@ lv_font_t* AppFont::inter(InterWeight weight, int32_t size) {
     if (!slot.font) {
       slot.weight = weight;
       slot.size   = size;
-      slot.font   = create_freetype_font(asset_paths_for_weight(weight), size, slot.path);
-      return slot.font ? slot.font : fallback_font();
+      slot.font   = create_freetype_font(paths_for_weight(weight), size, slot.path);
+      return slot.font ? slot.font : fallback_font(size);
     }
   }
 
-  LOG_WARN("Inter font cache is full; using default LVGL font");
-  return fallback_font();
+  LOG_WARN("Standard font cache is full; using default LVGL font");
+  return fallback_font(size);
 }
 
 lv_font_t* AppFont::keyboard_icons(int32_t size) {
@@ -188,14 +207,14 @@ lv_font_t* AppFont::keyboard_icons(int32_t size) {
     slot.size = size;
     slot.font = create_freetype_font(asset_paths, size, slot.path);
     if (!slot.font) {
-      return fallback_font();
+      return fallback_font(size);
     }
 
     return slot.font;
   }
 
   LOG_WARN("Keyboard icon font cache is full; using default LVGL font");
-  return fallback_font();
+  return fallback_font(size);
 }
 
 lv_font_t* AppFont::camera_icons(int32_t size) {
@@ -223,14 +242,14 @@ lv_font_t* AppFont::camera_icons(int32_t size) {
     slot.size = size;
     slot.font = create_freetype_font(asset_paths, size, slot.path);
     if (!slot.font) {
-      return fallback_font();
+      return fallback_font(size);
     }
 
     return slot.font;
   }
 
   LOG_WARN("Camera icon font cache is full; using default LVGL font");
-  return fallback_font();
+  return fallback_font(size);
 }
 
 }  // namespace ui::font

@@ -139,7 +139,7 @@ void SplashView::build_status_label_() {
   lv_obj_set_width(status_label_, LV_PCT(88));
   lv_label_set_long_mode(status_label_, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(status_label_, Font::inter_regular(13), 0);
+  lv_obj_set_style_text_font(status_label_, Font::standard_regular(13), 0);
   lv_label_set_text(status_label_, "Launching camera...");
   lv_obj_set_style_text_color(status_label_, lv_color_hex(color::LIGHT_ONSURFACE), 0);
 }
@@ -160,7 +160,7 @@ void SplashView::build_exit_hint_() {
 
   /* Press */
   lv_obj_t* exit_pre_label = lv_label_create(exit_hint_container_);
-  lv_obj_set_style_text_font(exit_pre_label, Font::inter_regular(16), 0);
+  lv_obj_set_style_text_font(exit_pre_label, Font::standard_regular(16), 0);
   lv_obj_set_style_text_color(exit_pre_label, lv_color_hex(color::LIGHT_ONSURFACE), 0);
   lv_label_set_text(exit_pre_label, "Press");
 
@@ -187,7 +187,7 @@ void SplashView::build_exit_hint_() {
 
   /* to return */
   lv_obj_t* exit_suf_label = lv_label_create(exit_hint_container_);
-  lv_obj_set_style_text_font(exit_suf_label, Font::inter_regular(16), 0);
+  lv_obj_set_style_text_font(exit_suf_label, Font::standard_regular(16), 0);
   lv_obj_set_style_text_color(exit_suf_label, lv_color_hex(color::LIGHT_ONSURFACE), 0);
   lv_label_set_text(exit_suf_label, "to return...");
 }

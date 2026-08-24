@@ -225,7 +225,7 @@ void CameraView::build_preview_() {
   lv_obj_center(preview_image_);
 
   capture_status_label_ = lv_label_create(preview_container_);
-  lv_obj_set_style_text_font(capture_status_label_, Font::inter_regular(12), 0);
+  lv_obj_set_style_text_font(capture_status_label_, Font::standard_regular(12), 0);
   lv_obj_set_style_text_color(capture_status_label_, lv_color_white(), 0);
   lv_obj_set_style_bg_color(capture_status_label_, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(capture_status_label_, LV_OPA_50, 0);
@@ -264,7 +264,7 @@ void CameraView::build_zoom_navigator_() {
   lv_obj_center(zoom_viewport_);
 
   zoom_label_ = lv_label_create(zoom_navigator_);
-  lv_obj_set_style_text_font(zoom_label_, Font::inter_regular(10), 0);
+  lv_obj_set_style_text_font(zoom_label_, Font::standard_regular(10), 0);
   lv_obj_set_style_text_color(zoom_label_, lv_color_white(), 0);
   lv_obj_set_style_bg_color(zoom_label_, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(zoom_label_, LV_OPA_50, 0);
@@ -364,7 +364,7 @@ void CameraView::build_help_icon_keypad_() {
   /* Create help text */
   help_label_ = lv_label_create(modal);
   lv_obj_set_style_text_color(help_label_, lv_color_white(), 0);
-  lv_obj_set_style_text_font(help_label_, Font::inter_bold(16), 0);
+  lv_obj_set_style_text_font(help_label_, Font::standard_medium(16), 0);
   lv_label_set_text(help_label_, "Help");
 }
 

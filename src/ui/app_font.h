@@ -73,18 +73,20 @@ inline constexpr const char* ICON_VOLUME_X            = "\uEA2A";
 inline constexpr const char* ICON_ZOOM_OUT            = "\uEA2B";
 inline constexpr const char* ICON_ZOOM_IN             = "\uEA2C";
 
-enum class InterWeight { Regular, Medium, SemiBold, Bold };
+enum class StandardFontWeight { Regular, Medium };
 
 class AppFont {
  public:
   static void init();
   static void deinit();
 
-  static lv_font_t* inter(InterWeight weight, int32_t size);
-  static lv_font_t* inter_regular(int32_t size) { return inter(InterWeight::Regular, size); }
-  static lv_font_t* inter_medium(int32_t size) { return inter(InterWeight::Medium, size); }
-  static lv_font_t* inter_semibold(int32_t size) { return inter(InterWeight::SemiBold, size); }
-  static lv_font_t* inter_bold(int32_t size) { return inter(InterWeight::Bold, size); }
+  static lv_font_t* standard(StandardFontWeight weight, int32_t size);
+  static lv_font_t* standard_regular(int32_t size) {
+    return standard(StandardFontWeight::Regular, size);
+  }
+  static lv_font_t* standard_medium(int32_t size) {
+    return standard(StandardFontWeight::Medium, size);
+  }
 
   /* A set of keyboard icons we'll be used */
   static lv_font_t* keyboard_icons(int32_t size);
