@@ -21,10 +21,10 @@
 namespace util {
 namespace {
 
-constexpr CameraResolutionConfig kDefaultResolution{1280, 720};
+constexpr CameraResolutionConfig kDefaultResolution{1640, 1232};
 
 bool is_supported_resolution(int width, int height) {
-  return (width == 1280 && height == 720) || (width == 640 && height == 480);
+  return width == 1640 && height == 1232;
 }
 
 #if defined(CAMERA_APP_SCONS_BUILD)
