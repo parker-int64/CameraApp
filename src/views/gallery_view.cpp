@@ -228,7 +228,7 @@ void GalleryView::build_preview_() {
   lv_obj_center(preview_image_);
 
   empty_label_ = lv_label_create(preview_container_);
-  lv_obj_set_style_text_font(empty_label_, Font::inter_medium(16), 0);
+  lv_obj_set_style_text_font(empty_label_, Font::standard_medium(16), 0);
   lv_obj_set_style_text_color(empty_label_, lv_color_hex(color::DARK_ONSURFACE), 0);
   lv_label_set_text(empty_label_, "No photos");
   lv_obj_center(empty_label_);
@@ -243,13 +243,13 @@ void GalleryView::build_top_bar_() {
   lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
 
   counter_label_ = lv_label_create(top_bar_);
-  lv_obj_set_style_text_font(counter_label_, Font::inter_bold(13), 0);
+  lv_obj_set_style_text_font(counter_label_, Font::standard_medium(13), 0);
   lv_obj_set_style_text_color(counter_label_, lv_color_white(), 0);
   lv_label_set_text(counter_label_, "0 / 0");
   lv_obj_align(counter_label_, LV_ALIGN_LEFT_MID, 8, 0);
 
   filename_label_ = lv_label_create(top_bar_);
-  lv_obj_set_style_text_font(filename_label_, Font::inter_regular(12), 0);
+  lv_obj_set_style_text_font(filename_label_, Font::standard_regular(12), 0);
   lv_obj_set_style_text_color(filename_label_, lv_color_hex(color::DARK_ONSURFACEVARIANT), 0);
   lv_obj_set_width(filename_label_, 210);
   lv_label_set_long_mode(filename_label_, LV_LABEL_LONG_DOT);
@@ -308,13 +308,13 @@ void GalleryView::build_delete_dialog_() {
   lv_obj_center(dialog_);
 
   dialog_title_label_ = lv_label_create(dialog_);
-  lv_obj_set_style_text_font(dialog_title_label_, Font::inter_bold(15), 0);
+  lv_obj_set_style_text_font(dialog_title_label_, Font::standard_medium(15), 0);
   lv_obj_set_style_text_color(dialog_title_label_, lv_color_white(), 0);
   lv_label_set_text(dialog_title_label_, "Delete photo?");
   lv_obj_align(dialog_title_label_, LV_ALIGN_TOP_LEFT, 0, 0);
 
   dialog_body_label_ = lv_label_create(dialog_);
-  lv_obj_set_style_text_font(dialog_body_label_, Font::inter_regular(12), 0);
+  lv_obj_set_style_text_font(dialog_body_label_, Font::standard_regular(12), 0);
   lv_obj_set_style_text_color(dialog_body_label_, lv_color_hex(color::DARK_ONSURFACEVARIANT), 0);
   lv_obj_set_width(dialog_body_label_, 216);
   lv_label_set_text(dialog_body_label_, "This cannot be undone.");
@@ -367,13 +367,13 @@ void GalleryView::build_info_overlay_() {
   lv_obj_align(info_panel_title_, LV_ALIGN_TOP_MID, 0, 0);
 
   lv_obj_t* title = lv_label_create(info_panel_title_);
-  lv_obj_set_style_text_font(title, Font::inter_bold(15), 0);
+  lv_obj_set_style_text_font(title, Font::standard_medium(15), 0);
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_label_set_text(title, "Photo info");
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   info_hint_label_ = lv_label_create(info_panel_title_);
-  lv_obj_set_style_text_font(info_hint_label_, Font::inter_semibold(10), 0);
+  lv_obj_set_style_text_font(info_hint_label_, Font::standard_medium(10), 0);
   lv_obj_set_style_text_color(info_hint_label_, lv_color_hex(color::DARK_ONSURFACEVARIANT), 0);
   lv_label_set_text(info_hint_label_, "ESC back");
   lv_obj_align(info_hint_label_, LV_ALIGN_TOP_RIGHT, 0, 2);
@@ -391,7 +391,7 @@ void GalleryView::build_info_overlay_() {
   lv_obj_align(info_panel_content_, LV_ALIGN_BOTTOM_MID, 0, 0);
 
   info_body_label_ = lv_label_create(info_panel_content_);
-  lv_obj_set_style_text_font(info_body_label_, Font::inter_regular(11), 0);
+  lv_obj_set_style_text_font(info_body_label_, Font::standard_regular(11), 0);
   lv_obj_set_style_text_color(info_body_label_, lv_color_hex(color::DARK_ONSURFACEVARIANT), 0);
   lv_obj_set_width(info_body_label_, 224);
   lv_label_set_long_mode(info_body_label_, LV_LABEL_LONG_WRAP);
@@ -420,7 +420,7 @@ lv_obj_t* GalleryView::build_dialog_action_(lv_obj_t* parent,
   lv_obj_set_style_translate_y(action_label, -1, 0);
 
   lv_obj_t* text_label = lv_label_create(action);
-  lv_obj_set_style_text_font(text_label, Font::inter_semibold(11), 0);
+  lv_obj_set_style_text_font(text_label, Font::standard_medium(11), 0);
   lv_label_set_text(text_label, text ? text : "");
 
   return action;
