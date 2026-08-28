@@ -11,10 +11,10 @@
 #if defined(CAMERA_APP_SCONS_BUILD)
 #include "camera_app_config.h"
 #endif
+#include <jpeglib.h>
+
 #include "services/jpeg_metadata.h"
 #include "utils/logger.h"
-
-#include <jpeglib.h>
 
 namespace service::camera_backend {
 namespace {
@@ -230,6 +230,60 @@ bool convert_yuv422_packed_frame(const std::vector<const uint8_t*>& planes,
 
 }  // namespace
 
+StillFrameStabilityTracker::StillFrameStabilityTracker(unsigned int discard_frames,
+                                                       unsigned int max_settle_frames,
+                                                       unsigned int stable_gain_frames,
+                                                       float colour_gain_tolerance)
+    : discard_frames_(discard_frames),
+      max_settle_frames_(std::max(discard_frames + 1, max_settle_frames)),
+      required_stable_gain_frames_(stable_gain_frames),
+      colour_gain_tolerance_(std::max(0.0f, colour_gain_tolerance)) {}
+
+void StillFrameStabilityTracker::reset() {
+  frame_count_               = 0;
+  stable_gain_frames_        = 0;
+  has_previous_colour_gains_ = false;
+  previous_red_gain_         = 0.0f;
+  previous_blue_gain_        = 0.0f;
+}
+
+StillFrameStabilityDecision StillFrameStabilityTracker::evaluate(
+    const StillFrameStabilitySample& sample) {
+  StillFrameStabilityDecision decision;
+  decision.frame = ++frame_count_;
+
+  if (sample.colour_gains_available) {
+    if (has_previous_colour_gains_) {
+      const float red_delta  = std::abs(sample.red_gain - previous_red_gain_) /
+                               std::max(std::abs(previous_red_gain_), 0.001f);
+      const float blue_delta = std::abs(sample.blue_gain - previous_blue_gain_) /
+                               std::max(std::abs(previous_blue_gain_), 0.001f);
+      decision.gain_delta    = std::max(red_delta, blue_delta);
+      if (decision.gain_delta <= colour_gain_tolerance_) {
+        ++stable_gain_frames_;
+      } else {
+        stable_gain_frames_ = 0;
+      }
+    }
+    previous_red_gain_         = sample.red_gain;
+    previous_blue_gain_        = sample.blue_gain;
+    has_previous_colour_gains_ = true;
+  } else {
+    stable_gain_frames_ = 0;
+  }
+  decision.stable_gain_frames = stable_gain_frames_;
+
+  const bool minimum_frames_seen = decision.frame > discard_frames_;
+  const bool ae_ready            = sample.ae_state_available && sample.ae_converged;
+  const bool awb_ready =
+      sample.awb_state_available
+          ? sample.awb_converged
+          : sample.colour_gains_available && stable_gain_frames_ >= required_stable_gain_frames_;
+  decision.forced  = decision.frame >= max_settle_frames_;
+  decision.capture = decision.forced || (minimum_frames_seen && ae_ready && awb_ready);
+  return decision;
+}
+
 uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b) {
   return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
@@ -340,6 +394,87 @@ bool save_jpeg_rgb888(const std::string& path,
   return true;
 }
 
+bool save_jpeg_yuv420(const std::string& path,
+                      const std::vector<uint8_t>& yuv420,
+                      int width,
+                      int height,
+                      int stride,
+                      int quality,
+                      const ExifMetadata* exif_metadata) {
+  if (width <= 0 || height <= 0 || stride < width || (width & 1) || (height & 1) || (stride & 1)) {
+    return false;
+  }
+  const size_t y_size  = static_cast<size_t>(stride) * height;
+  const int uv_stride  = stride / 2;
+  const size_t uv_size = static_cast<size_t>(uv_stride) * (height / 2);
+  if (yuv420.size() < y_size + 2 * uv_size) {
+    return false;
+  }
+
+  FILE* fp = std::fopen(path.c_str(), "wb");
+  if (!fp) {
+    LOG_ERROR("Failed to open jpeg file: {}", path);
+    return false;
+  }
+
+  jpeg_compress_struct cinfo{};
+  jpeg_error_mgr jerr{};
+  cinfo.err = jpeg_std_error(&jerr);
+  jpeg_create_compress(&cinfo);
+  jpeg_stdio_dest(&cinfo, fp);
+
+  cinfo.image_width      = static_cast<JDIMENSION>(width);
+  cinfo.image_height     = static_cast<JDIMENSION>(height);
+  cinfo.input_components = 3;
+  cinfo.in_color_space   = JCS_YCbCr;
+  jpeg_set_defaults(&cinfo);
+  cinfo.raw_data_in = TRUE;
+  jpeg_set_quality(&cinfo, quality, TRUE);
+  jpeg_start_compress(&cinfo, TRUE);
+
+  ExifMetadata default_metadata;
+  if (!exif_metadata) {
+    default_metadata = make_default_exif_metadata(width, height);
+    exif_metadata    = &default_metadata;
+  }
+  const auto exif_payload = build_exif_app1(*exif_metadata);
+  if (!exif_payload.empty() && exif_payload.size() <= 65533) {
+    jpeg_write_marker(&cinfo,
+                      JPEG_APP0 + 1,
+                      reinterpret_cast<const JOCTET*>(exif_payload.data()),
+                      static_cast<unsigned int>(exif_payload.size()));
+  }
+
+  const uint8_t* y_plane = yuv420.data();
+  const uint8_t* u_plane = y_plane + y_size;
+  const uint8_t* v_plane = u_plane + uv_size;
+  JSAMPROW y_rows[16];
+  JSAMPROW u_rows[8];
+  JSAMPROW v_rows[8];
+
+  while (cinfo.next_scanline < cinfo.image_height) {
+    const size_t y_row  = cinfo.next_scanline;
+    const size_t uv_row = y_row / 2;
+    for (size_t i = 0; i < 16; ++i) {
+      const size_t row = std::min(y_row + i, static_cast<size_t>(height - 1));
+      y_rows[i]        = const_cast<JSAMPROW>(y_plane + row * stride);
+    }
+    for (size_t i = 0; i < 8; ++i) {
+      const size_t row = std::min(uv_row + i, static_cast<size_t>(height / 2 - 1));
+      u_rows[i]        = const_cast<JSAMPROW>(u_plane + row * uv_stride);
+      v_rows[i]        = const_cast<JSAMPROW>(v_plane + row * uv_stride);
+    }
+    JSAMPARRAY rows[] = {y_rows, u_rows, v_rows};
+    jpeg_write_raw_data(&cinfo, rows, 16);
+  }
+
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  std::fclose(fp);
+  (void)::chmod(path.c_str(), 0644);
+  return true;
+}
+
 std::vector<CameraResolution> capture_resolution_candidates(CameraResolution preferred) {
   std::vector<CameraResolution> candidates;
   auto add_unique = [&candidates](CameraResolution resolution) {
@@ -381,7 +516,7 @@ bool resize_rgb888(const std::vector<uint8_t>& source,
     return true;
   }
 
-  int crop_width = source_width;
+  int crop_width  = source_width;
   int crop_height = source_height;
   if (static_cast<int64_t>(source_width) * target_height >
       static_cast<int64_t>(source_height) * target_width) {
@@ -396,13 +531,12 @@ bool resize_rgb888(const std::vector<uint8_t>& source,
   for (int y = 0; y < target_height; ++y) {
     const int source_y = crop_y + std::min(crop_height - 1, y * crop_height / target_height);
     for (int x = 0; x < target_width; ++x) {
-      const int source_x = crop_x + std::min(crop_width - 1, x * crop_width / target_width);
-      const size_t source_offset =
-          (static_cast<size_t>(source_y) * source_width + source_x) * 3;
+      const int source_x         = crop_x + std::min(crop_width - 1, x * crop_width / target_width);
+      const size_t source_offset = (static_cast<size_t>(source_y) * source_width + source_x) * 3;
       const size_t target_offset = (static_cast<size_t>(y) * target_width + x) * 3;
-      output[target_offset]     = source[source_offset];
-      output[target_offset + 1] = source[source_offset + 1];
-      output[target_offset + 2] = source[source_offset + 2];
+      output[target_offset]      = source[source_offset];
+      output[target_offset + 1]  = source[source_offset + 1];
+      output[target_offset + 2]  = source[source_offset + 2];
     }
   }
   return true;
@@ -465,8 +599,8 @@ bool convert_frame_to_outputs(const std::vector<const uint8_t*>& planes,
   }
 
   if (is_rgb565 && !is_still && preview_frame && !rotate_180) {
-    preview_frame->width  = width;
-    preview_frame->height = height;
+    preview_frame->width     = width;
+    preview_frame->height    = height;
     const size_t pixel_count = static_cast<size_t>(width) * height;
     if (!preview_frame->rgb565 || preview_frame->rgb565->size() != pixel_count) {
       preview_frame->rgb565 = std::make_shared<std::vector<uint16_t>>(pixel_count);

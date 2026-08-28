@@ -32,11 +32,10 @@ void CameraViewModel::update(uint32_t delta_ms) {
     new_frame_    = true;
   }
 
-  std::string path;
-  const service::CaptureState state = services_->camera->consume_capture_state(&path);
-  if (state == service::CaptureState::Saved || state == service::CaptureState::Failed) {
-    capture_state_ = state;
-    capture_path_  = std::move(path);
+  service::CaptureResult result = services_->camera->consume_capture_result();
+  if (result.state == service::CaptureState::Saved ||
+      result.state == service::CaptureState::Failed) {
+    capture_result_ = std::move(result);
   }
 }
 
@@ -109,17 +108,13 @@ bool CameraViewModel::consume_capture_feedback() {
   return true;
 }
 
-service::CaptureState CameraViewModel::consume_capture_state(std::string* path) {
-  if (path) {
-    *path = capture_path_;
+service::CaptureResult CameraViewModel::consume_capture_result() {
+  service::CaptureResult result = capture_result_;
+  if (capture_result_.state == service::CaptureState::Saved ||
+      capture_result_.state == service::CaptureState::Failed) {
+    capture_result_.state = service::CaptureState::Idle;
   }
-
-  const service::CaptureState state = capture_state_;
-  if (capture_state_ == service::CaptureState::Saved ||
-      capture_state_ == service::CaptureState::Failed) {
-    capture_state_ = service::CaptureState::Idle;
-  }
-  return state;
+  return result;
 }
 
 service::CameraZoomState CameraViewModel::zoom_state() const {

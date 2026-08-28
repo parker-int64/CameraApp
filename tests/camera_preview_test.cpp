@@ -1,15 +1,19 @@
-#include <cassert>
+// libjpeg's public header expects size_t and FILE to be declared first.
+// clang-format off
+#include <cstddef>
 #include <cstdio>
+#include <jpeglib.h>
+// clang-format on
+
+#include <cassert>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <vector>
 
-#include <jpeglib.h>
-
-#include "services/camera_frame_pool.h"
 #include "services/camera_backend_utils.h"
+#include "services/camera_frame_pool.h"
 #include "services/preview_frame_limiter.h"
 
 namespace {
@@ -38,8 +42,8 @@ void test_pool_reuses_only_released_buffers() {
 }
 
 void test_frame_moves_without_copying_pixels() {
-  auto frame       = make_frame(7);
-  const auto* data = frame.data();
+  auto frame                         = make_frame(7);
+  const auto* data                   = frame.data();
   service::CameraFrame service_frame = std::move(frame);
   service::CameraFrame view_frame    = std::move(service_frame);
   assert(view_frame.data() == data);
@@ -65,8 +69,18 @@ void test_limiter_keeps_latest_frame_and_handles_wrap() {
 
 void test_rgb_resize_produces_requested_dimensions() {
   const std::vector<uint8_t> source = {
-      1, 2, 3, 4, 5, 6,
-      7, 8, 9, 10, 11, 12,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
   };
   std::vector<uint8_t> resized;
   assert(service::camera_backend::resize_rgb888(source, 2, 2, 4, 4, resized));
@@ -80,17 +94,26 @@ void test_rgb_resize_produces_requested_dimensions() {
 
 void expect_saved_jpeg_dimensions(int width, int height) {
   const std::vector<uint8_t> source = {
-      255, 0, 0, 0, 255, 0,
-      0, 0, 255, 255, 255, 255,
+      255,
+      0,
+      0,
+      0,
+      255,
+      0,
+      0,
+      0,
+      255,
+      255,
+      255,
+      255,
   };
   std::vector<uint8_t> resized;
   assert(service::camera_backend::resize_rgb888(source, 2, 2, width, height, resized));
 
-  const auto path = std::filesystem::temp_directory_path() /
-                    ("camera-resolution-" + std::to_string(width) + "x" +
-                     std::to_string(height) + ".jpg");
-  assert(service::camera_backend::save_jpeg_rgb888(
-      path.string(), resized, width, height, 90));
+  const auto path =
+      std::filesystem::temp_directory_path() /
+      ("camera-resolution-" + std::to_string(width) + "x" + std::to_string(height) + ".jpg");
+  assert(service::camera_backend::save_jpeg_rgb888(path.string(), resized, width, height, 90));
 
   FILE* input = std::fopen(path.c_str(), "rb");
   assert(input);
@@ -112,6 +135,84 @@ void test_saved_jpeg_matches_setting_resolutions() {
   expect_saved_jpeg_dimensions(1280, 720);
 }
 
+void test_yuv420_jpeg_honours_dimensions_and_stride() {
+  constexpr int width      = 18;
+  constexpr int height     = 10;
+  constexpr int stride     = 32;
+  constexpr size_t y_size  = stride * height;
+  constexpr size_t uv_size = (stride / 2) * (height / 2);
+  std::vector<uint8_t> yuv420(y_size + 2 * uv_size, 128);
+  std::fill(yuv420.begin(), yuv420.begin() + y_size, 180);
+
+  const auto path = std::filesystem::temp_directory_path() / "camera-yuv420-stride.jpg";
+  assert(
+      service::camera_backend::save_jpeg_yuv420(path.string(), yuv420, width, height, stride, 95));
+
+  FILE* input = std::fopen(path.c_str(), "rb");
+  assert(input);
+  jpeg_decompress_struct info{};
+  jpeg_error_mgr error{};
+  info.err = jpeg_std_error(&error);
+  jpeg_create_decompress(&info);
+  jpeg_stdio_src(&info, input);
+  assert(jpeg_read_header(&info, TRUE) == JPEG_HEADER_OK);
+  assert(static_cast<int>(info.image_width) == width);
+  assert(static_cast<int>(info.image_height) == height);
+  jpeg_destroy_decompress(&info);
+  std::fclose(input);
+  std::filesystem::remove(path);
+}
+
+void test_still_stability_uses_colour_gains_when_awb_state_is_unavailable() {
+  service::camera_backend::StillFrameStabilityTracker tracker;
+  service::camera_backend::StillFrameStabilitySample sample;
+  sample.ae_state_available     = true;
+  sample.ae_converged           = true;
+  sample.colour_gains_available = true;
+  sample.red_gain               = 1.8f;
+  sample.blue_gain              = 1.4f;
+
+  assert(!tracker.evaluate(sample).capture);
+  sample.red_gain  = 1.81f;
+  sample.blue_gain = 1.405f;
+  assert(!tracker.evaluate(sample).capture);
+  sample.red_gain   = 1.805f;
+  sample.blue_gain  = 1.41f;
+  const auto stable = tracker.evaluate(sample);
+  assert(stable.capture);
+  assert(!stable.forced);
+  assert(stable.frame == 3);
+}
+
+void test_still_stability_prefers_awb_state_and_has_a_bounded_fallback() {
+  service::camera_backend::StillFrameStabilityTracker tracker;
+  service::camera_backend::StillFrameStabilitySample sample;
+  sample.ae_state_available     = true;
+  sample.ae_converged           = true;
+  sample.awb_state_available    = true;
+  sample.awb_converged          = false;
+  sample.colour_gains_available = true;
+  sample.red_gain               = 1.8f;
+  sample.blue_gain              = 1.4f;
+
+  for (unsigned int frame = 1; frame < 6; ++frame) {
+    const auto decision = tracker.evaluate(sample);
+    assert(!decision.capture);
+    assert(!decision.forced);
+  }
+  const auto forced = tracker.evaluate(sample);
+  assert(forced.capture);
+  assert(forced.forced);
+
+  tracker.reset();
+  sample.awb_converged = true;
+  assert(!tracker.evaluate(sample).capture);
+  assert(!tracker.evaluate(sample).capture);
+  const auto converged = tracker.evaluate(sample);
+  assert(converged.capture);
+  assert(!converged.forced);
+}
+
 }  // namespace
 
 int main() {
@@ -120,5 +221,8 @@ int main() {
   test_limiter_keeps_latest_frame_and_handles_wrap();
   test_rgb_resize_produces_requested_dimensions();
   test_saved_jpeg_matches_setting_resolutions();
+  test_yuv420_jpeg_honours_dimensions_and_stride();
+  test_still_stability_uses_colour_gains_when_awb_state_is_unavailable();
+  test_still_stability_prefers_awb_state_and_has_a_bounded_fallback();
   return 0;
 }

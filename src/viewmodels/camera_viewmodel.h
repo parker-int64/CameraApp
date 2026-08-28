@@ -21,7 +21,7 @@ class CameraViewModel : public BaseViewModel {
   bool shortcut_hint_visible() const { return shortcut_hint_visible_; }
   bool consume_frame(service::CameraFrame& frame);
   bool consume_capture_feedback();
-  service::CaptureState consume_capture_state(std::string* path = nullptr);
+  service::CaptureResult consume_capture_result();
   service::CameraZoomState zoom_state() const;
   std::string status_text() const;
 
@@ -31,8 +31,7 @@ class CameraViewModel : public BaseViewModel {
   service::CameraFrame latest_frame_;
   bool new_frame_{false};
   bool capture_feedback_{false};
-  service::CaptureState capture_state_{service::CaptureState::Idle};
-  std::string capture_path_;
+  service::CaptureResult capture_result_{};
 };
 
 }  // namespace viewmodel

@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.23)
 
-set(CAMERA_APP_VERSION "0.3.5" CACHE STRING "CameraApp semantic version")
+set(CAMERA_APP_VERSION "0.3.6" CACHE STRING "CameraApp semantic version")
 project(camera_app VERSION "${CAMERA_APP_VERSION}" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -485,6 +485,7 @@ add_library(${PROJECT_NAME}_ui STATIC
     src/ui/app_font.cpp
     src/views/camera_view.cpp
     src/views/gallery_view.cpp
+    src/views/help_popup.cpp
     src/views/splash_view.cpp
 )
 target_include_directories(${PROJECT_NAME}_ui PUBLIC ${APP_COMMON_INCLUDE_DIRS})

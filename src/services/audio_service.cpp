@@ -181,7 +181,7 @@ struct AudioService::Impl {
       return false;
     }
 
-    LOG_DEBUG("Miniaudio playback started: {}", path);
+    LOG_VERBOSE("Miniaudio playback started: {}", path);
     return true;
   }
 

@@ -24,6 +24,7 @@
 #include "viewmodels/splash_viewmodel.h"
 #include "views/camera_view.h"
 #include "views/gallery_view.h"
+#include "views/help_popup.h"
 #include "views/splash_view.h"
 
 #if USE_DESKTOP
@@ -235,7 +236,7 @@ void handle_navigation(screen::ScreenManager& manager, app::AppStateMachine& sta
   static view::CameraView* preview_owner = nullptr;
   static service::PreviewFrameLimiter preview_limiter;
   static uint32_t preview_stats_started_ms = 0;
-  auto current = manager.current_screen();
+  auto current                             = manager.current_screen();
   if (!current) {
     LOG_ERROR("Failed to get current screen...");
     return;
@@ -271,11 +272,10 @@ void handle_navigation(screen::ScreenManager& manager, app::AppStateMachine& sta
       camera_view->play_capture_feedback();
     }
 
-    std::string path;
-    const service::CaptureState capture_state = camera_vm->consume_capture_state(&path);
-    if (capture_state == service::CaptureState::Saved ||
-        capture_state == service::CaptureState::Failed) {
-      camera_view->set_capture_status(capture_state, path);
+    const service::CaptureResult capture_result = camera_vm->consume_capture_result();
+    if (capture_result.state == service::CaptureState::Saved ||
+        capture_result.state == service::CaptureState::Failed) {
+      camera_view->set_capture_status(capture_result);
     }
   }
 
@@ -342,19 +342,44 @@ int main() {
     return 1;
   }
 
-  auto services = service::AppServices::create();
+  auto services                                 = service::AppServices::create();
   const util::CameraResolutionConfig resolution = util::load_camera_resolution_config();
+  LOG_INFO("Configured still capture resolution: {}x{}", resolution.width, resolution.height);
   services->camera->set_capture_resolution({resolution.width, resolution.height});
   app::AppStateMachine state_machine(app::AppState::Splash);
   screen::ScreenManager manager(lv_scr_act());
   setup_screen_manager(manager, services);
   manager.push_screen(app::screen_id(app::AppState::Splash));
 
+  auto help_popup = std::make_unique<view::HelpPopup>(lv_layer_top());
+
   LOG_INFO("Camera application started");
 
   bool running = true;
   auto dispatch_app_action =
-      [&running, &manager, &services, &state_machine](app::AppAction action) {
+      [&running, &manager, &services, &state_machine, &help_popup](app::AppAction action) {
+        if (action == app::AppAction::ToggleHint) {
+          if (help_popup->visible()) {
+            help_popup->hide();
+          } else {
+            help_popup->show(state_machine.current_state());
+          }
+          if (services && services->audio) {
+            services->audio->play_click();
+          }
+          return;
+        }
+
+        if (help_popup->visible()) {
+          if (action == app::AppAction::Exit) {
+            help_popup->hide();
+            if (services && services->audio) {
+              services->audio->play_click();
+            }
+          }
+          return;
+        }
+
         if (action == app::AppAction::ToggleCameraBackend) {
           if (services && services->camera) {
             const service::CameraBackendPreference preference =
@@ -441,6 +466,7 @@ int main() {
   }
 
   keypad.close();
+  help_popup.reset();
   manager.clear();
   stop_app_services(services);
   teardown_lvgl(display);

@@ -5,8 +5,8 @@
 namespace util {
 
 struct CameraResolutionConfig {
-  int width{1640};
-  int height{1232};
+  int width{3280};
+  int height{2464};
 };
 
 std::string device_config_path();
