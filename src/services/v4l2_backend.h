@@ -20,7 +20,7 @@ class V4l2Backend final : public CameraInterface {
   bool stop_video_recording() override;
   void set_capture_resolution(CameraResolution resolution) override;
   void set_zoom_state(CameraZoomState state) override;
-  CaptureState consume_capture_state(std::string* path = nullptr) override;
+  CaptureResult consume_capture_result() override;
   VideoState consume_video_state(std::string* path = nullptr) override;
   std::string last_capture_path() const override;
   std::string last_video_path() const override;

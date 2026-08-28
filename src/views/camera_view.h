@@ -31,7 +31,7 @@ class CameraView : public BaseView {
   void set_preview_frame(const service::CameraFrame& frame);
   void set_zoom_state(const service::CameraZoomState& state);
   void play_capture_feedback();
-  void set_capture_status(service::CaptureState state, const std::string& path);
+  void set_capture_status(const service::CaptureResult& result);
   void clear_capture_status_timer();
 
  protected:

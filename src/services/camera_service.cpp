@@ -119,12 +119,11 @@ void CameraService::start() {
   }
 
   LOG_INFO("Camera service start requested");
-  elapsed_ms_    = 0;
-  new_frame_     = false;
-  preview_ready_ = false;
-  capture_state_ = CaptureState::Idle;
-  last_capture_path_.clear();
-  video_state_ = VideoState::Idle;
+  elapsed_ms_     = 0;
+  new_frame_      = false;
+  preview_ready_  = false;
+  capture_result_ = {};
+  video_state_    = VideoState::Idle;
   last_video_path_.clear();
 
 #if USE_DESKTOP
@@ -185,12 +184,10 @@ void CameraService::update(uint32_t delta_ms) {
       preview_ready_ = true;
     }
 
-    std::string path;
-    const CaptureState state = backend_->consume_capture_state(&path);
-    if (state == CaptureState::Saved || state == CaptureState::Failed ||
-        state == CaptureState::Requested) {
-      capture_state_     = state;
-      last_capture_path_ = std::move(path);
+    CaptureResult result = backend_->consume_capture_result();
+    if (result.state == CaptureState::Saved || result.state == CaptureState::Failed ||
+        result.state == CaptureState::Requested) {
+      capture_result_ = std::move(result);
     }
 
     std::string video_path;
@@ -216,24 +213,28 @@ bool CameraService::consume_frame(CameraFrame& frame) {
 
 bool CameraService::request_capture() {
   if (state_ != CameraServiceState::Ready) {
-    capture_state_  = CaptureState::Failed;
-    status_message_ = "Camera not ready";
+    capture_result_.state = CaptureState::Failed;
+    status_message_       = "Camera not ready";
     return false;
   }
 
 #if USE_DESKTOP
-  last_capture_path_ = "desktop-preview-not-saved.jpg";
-  capture_state_     = CaptureState::Saved;
+  capture_result_.path                 = "desktop-preview-not-saved.jpg";
+  capture_result_.state                = CaptureState::Saved;
+  capture_result_.requested_resolution = capture_resolution_;
+  capture_result_.saved_resolution     = capture_resolution_;
   return true;
 #else
   if (!backend_ || !backend_->request_capture()) {
-    capture_state_  = CaptureState::Failed;
-    status_message_ = "Capture failed";
+    capture_result_.state = CaptureState::Failed;
+    status_message_       = "Capture failed";
     return false;
   }
 
-  capture_state_     = CaptureState::Requested;
-  last_capture_path_ = backend_->last_capture_path();
+  capture_result_.state                = CaptureState::Requested;
+  capture_result_.path                 = backend_->last_capture_path();
+  capture_result_.requested_resolution = capture_resolution_;
+  capture_result_.saved_resolution     = {};
   return true;
 #endif
 }
@@ -337,16 +338,13 @@ void CameraService::pan(int dx, int dy) {
 #endif
 }
 
-CaptureState CameraService::consume_capture_state(std::string* path) {
-  if (path) {
-    *path = last_capture_path_;
+CaptureResult CameraService::consume_capture_result() {
+  CaptureResult result = capture_result_;
+  if (capture_result_.state == CaptureState::Saved ||
+      capture_result_.state == CaptureState::Failed) {
+    capture_result_.state = CaptureState::Idle;
   }
-
-  const CaptureState state = capture_state_;
-  if (capture_state_ == CaptureState::Saved || capture_state_ == CaptureState::Failed) {
-    capture_state_ = CaptureState::Idle;
-  }
-  return state;
+  return result;
 }
 
 VideoState CameraService::consume_video_state(std::string* path) {
@@ -364,8 +362,7 @@ VideoState CameraService::consume_video_state(std::string* path) {
 void CameraService::generate_placeholder_frame_() {
   constexpr int width  = kPreviewWidth;
   constexpr int height = kPreviewHeight;
-  if (latest_frame_.width != width || latest_frame_.height != height ||
-      !latest_frame_.rgb565 ||
+  if (latest_frame_.width != width || latest_frame_.height != height || !latest_frame_.rgb565 ||
       latest_frame_.rgb565->size() != static_cast<size_t>(width * height)) {
     latest_frame_.width  = width;
     latest_frame_.height = height;
@@ -375,9 +372,9 @@ void CameraService::generate_placeholder_frame_() {
   const uint32_t t = elapsed_ms_ / 16;
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
-      const uint8_t r                     = static_cast<uint8_t>((x + t) & 0xFF);
-      const uint8_t g                     = static_cast<uint8_t>((y * 2 + t) & 0xFF);
-      const uint8_t b                     = static_cast<uint8_t>((x + y + t * 2) & 0xFF);
+      const uint8_t r                        = static_cast<uint8_t>((x + t) & 0xFF);
+      const uint8_t g                        = static_cast<uint8_t>((y * 2 + t) & 0xFF);
+      const uint8_t b                        = static_cast<uint8_t>((x + y + t * 2) & 0xFF);
       (*latest_frame_.rgb565)[y * width + x] = rgb888_to_rgb565(r, g, b);
     }
   }

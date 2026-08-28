@@ -2,11 +2,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #if defined(CAMERA_APP_SCONS_BUILD)
@@ -20,18 +26,22 @@
 
 #if !USE_DESKTOP
 #include <fcntl.h>
+#include <libcamera/base/shared_fd.h>
+#include <libcamera/base/unique_fd.h>
 #include <libcamera/camera.h>
 #include <libcamera/camera_manager.h>
 #include <libcamera/control_ids.h>
 #include <libcamera/formats.h>
-#include <libcamera/framebuffer_allocator.h>
+#include <libcamera/framebuffer.h>
 #include <libcamera/orientation.h>
 #include <libcamera/property_ids.h>
 #include <libcamera/request.h>
 #include <libcamera/stream.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-heap.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <map>
@@ -42,19 +52,101 @@ namespace service {
 namespace {
 
 using namespace camera_backend;
-constexpr unsigned int kHighResolutionBufferCount = 4;
-constexpr unsigned int kFallbackBufferCount       = 3;
-constexpr int64_t kPreviewMinFrameDurationUs      = 16667;
-constexpr int64_t kPreviewMaxFrameDurationUs      = 33333;
+constexpr unsigned int kPreviewBufferCount   = 1;
+constexpr unsigned int kCaptureBufferCount   = 1;
+constexpr int64_t kPreviewMinFrameDurationUs = 16667;
+constexpr int64_t kPreviewMaxFrameDurationUs = 33333;
+constexpr int64_t kStillMinFrameDurationUs   = 100;
+constexpr int64_t kStillMaxFrameDurationUs   = 1000000000;
+constexpr unsigned int kSensorRawBitDepth    = 10;
+constexpr int kStillJpegQuality              = 95;
+constexpr auto kStillCaptureTimeout          = std::chrono::seconds(30);
 
 #if !USE_DESKTOP
-void sync_dma_buf(int fd, uint64_t flags) {
+constexpr const char* kCameraDmaHeapPath = "/dev/dma_heap/default_cma_region";
+
+class CameraDmaHeap {
+ public:
+  CameraDmaHeap() {
+    const int fd = ::open(kCameraDmaHeapPath, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+      LOG_ERROR("Failed to open camera dma-heap {}: {}", kCameraDmaHeapPath, std::strerror(errno));
+      return;
+    }
+    handle_ = libcamera::UniqueFD(fd);
+  }
+
+  bool is_valid() const { return handle_.isValid(); }
+
+  libcamera::UniqueFD allocate(const std::string& name, size_t size) const {
+    if (!handle_.isValid() || name.empty() || size == 0) {
+      return {};
+    }
+
+    struct dma_heap_allocation_data allocation{};
+    allocation.len      = size;
+    allocation.fd_flags = O_CLOEXEC | O_RDWR;
+    if (::ioctl(handle_.get(), DMA_HEAP_IOCTL_ALLOC, &allocation) < 0) {
+      LOG_ERROR("dma-heap allocation failed: heap={} name={} size={} error={}",
+                kCameraDmaHeapPath,
+                name,
+                size,
+                std::strerror(errno));
+      return {};
+    }
+
+    libcamera::UniqueFD fd(static_cast<int>(allocation.fd));
+    if (::ioctl(fd.get(), DMA_BUF_SET_NAME, name.c_str()) < 0) {
+      LOG_ERROR("Failed to name dma-buf {}: {}", name, std::strerror(errno));
+      return {};
+    }
+    return fd;
+  }
+
+ private:
+  libcamera::UniqueFD handle_;
+};
+
+bool configure_rpi_apps_pipeline() {
+  const char* existing = std::getenv("LIBCAMERA_RPI_CONFIG_FILE");
+  if (existing && existing[0]) {
+    LOG_INFO("Using configured Raspberry Pi pipeline file: {}", existing);
+    return true;
+  }
+
+  constexpr const char* config_paths[] = {
+      "/usr/local/share/libcamera/pipeline/rpi/vc4/rpi_apps.yaml",
+      "/usr/share/libcamera/pipeline/rpi/vc4/rpi_apps.yaml",
+  };
+  for (const char* path : config_paths) {
+    struct stat info{};
+    if (::stat(path, &info) == 0 && S_ISREG(info.st_mode)) {
+      if (::setenv("LIBCAMERA_RPI_CONFIG_FILE", path, 1) == 0) {
+        LOG_INFO("Using rpicam-apps pipeline configuration: {}", path);
+        return true;
+      }
+      LOG_ERROR("Failed to set Raspberry Pi pipeline configuration {}: {}",
+                path,
+                std::strerror(errno));
+      return false;
+    }
+  }
+
+  LOG_ERROR("Raspberry Pi rpi_apps.yaml pipeline configuration was not found");
+  return false;
+}
+
+bool sync_dma_buf(int fd, uint64_t flags) {
   if (fd < 0) {
-    return;
+    return false;
   }
 
   struct dma_buf_sync sync{flags};
-  (void)::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+  if (::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
+    LOG_ERROR("dma-buf sync failed: fd={} flags={} error={}", fd, flags, std::strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 PixelFormat map_libcamera_format(const libcamera::PixelFormat& format) {
@@ -259,25 +351,85 @@ struct LibcameraBackend::Impl {
     std::vector<Plane> planes;
   };
 
+  class DmaBufReadGuard {
+   public:
+    explicit DmaBufReadGuard(const MappedBuffer& buffer) {
+      for (const auto& plane : buffer.planes) {
+        if (std::find(fds_.begin(), fds_.end(), plane.fd) != fds_.end()) {
+          continue;
+        }
+        if (!sync_dma_buf(plane.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ)) {
+          valid_ = false;
+          continue;
+        }
+        fds_.push_back(plane.fd);
+      }
+      valid_ = valid_ && !fds_.empty();
+    }
+
+    ~DmaBufReadGuard() {
+      for (int fd : fds_) {
+        sync_dma_buf(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+      }
+    }
+
+    bool is_valid() const { return valid_; }
+
+   private:
+    std::vector<int> fds_;
+    bool valid_{true};
+  };
+
+  struct StillEncodeJob {
+    std::vector<uint8_t> yuv420;
+    int width{0};
+    int height{0};
+    int stride{0};
+    std::string path;
+    CameraResolution requested_resolution{};
+    ExifMetadata metadata;
+  };
+
+  enum class StreamMode { Stopped, Preview, Still };
+
   std::unique_ptr<libcamera::CameraManager> manager;
   std::shared_ptr<libcamera::Camera> camera;
   std::unique_ptr<libcamera::CameraConfiguration> config;
-  std::unique_ptr<libcamera::FrameBufferAllocator> allocator;
+  CameraDmaHeap dma_heap;
+  std::map<libcamera::Stream*, std::vector<std::unique_ptr<libcamera::FrameBuffer>>> frame_buffers;
   libcamera::Stream* preview_stream{nullptr};
   libcamera::Stream* still_stream{nullptr};
+  libcamera::Stream* raw_stream{nullptr};
   std::vector<std::unique_ptr<libcamera::Request>> requests;
-  std::vector<libcamera::FrameBuffer*> preview_buffers;
-  std::vector<libcamera::FrameBuffer*> free_still_buffers;
   std::map<const libcamera::FrameBuffer*, MappedBuffer> mapped_buffers;
   std::mutex mutex;
   std::mutex video_mutex;
+  std::mutex still_mutex;
+  std::mutex capture_mutex;
+  std::condition_variable still_cv;
+  std::condition_variable capture_cv;
+  std::deque<StillEncodeJob> still_jobs;
+  std::thread still_worker;
+  std::thread capture_worker;
+  bool still_worker_stop{false};
+  bool still_worker_running{false};
+  bool capture_worker_stop{false};
+  bool capture_worker_running{false};
+  bool capture_job_pending{false};
+  bool capture_frame_done{false};
+  bool capture_frame_ok{false};
+  StillFrameStabilityTracker still_stability;
+  CameraResolution capture_output_resolution{kSensorMaxWidth, kSensorMaxHeight};
+  CameraResolution capture_requested_resolution{kSensorMaxWidth, kSensorMaxHeight};
   CameraFrame pending_frame;
   CameraFramePool preview_pool{3};
   bool new_frame{false};
-  bool opened{false};
-  bool streaming{false};
-  std::atomic<bool> capture_requested{false};
+  std::atomic<bool> opened{false};
+  std::atomic<bool> streaming{false};
+  std::atomic<bool> capture_in_progress{false};
+  std::atomic<StreamMode> stream_mode{StreamMode::Stopped};
   CaptureState capture_state{CaptureState::Idle};
+  CameraResolution capture_saved_resolution{};
   VideoState video_state{VideoState::Idle};
   std::string last_capture_path;
   std::string last_video_path_value;
@@ -305,6 +457,187 @@ struct LibcameraBackend::Impl {
   bool has_sensor_sensitivity{false};
   FocusCapability focus_capability{};
 
+  void start_still_worker() {
+    std::lock_guard<std::mutex> lock(still_mutex);
+    if (still_worker_running) return;
+    still_worker_stop    = false;
+    still_worker_running = true;
+    still_worker         = std::thread([this] { still_encode_loop(); });
+  }
+
+  void stop_still_worker() {
+    {
+      std::lock_guard<std::mutex> lock(still_mutex);
+      if (!still_worker_running) return;
+      still_worker_stop = true;
+    }
+    still_cv.notify_one();
+    if (still_worker.joinable()) still_worker.join();
+    std::lock_guard<std::mutex> lock(still_mutex);
+    still_jobs.clear();
+    still_worker_running = false;
+  }
+
+  void still_encode_loop() {
+    for (;;) {
+      StillEncodeJob job;
+      {
+        std::unique_lock<std::mutex> lock(still_mutex);
+        still_cv.wait(lock, [this] { return still_worker_stop || !still_jobs.empty(); });
+        if (still_jobs.empty() && still_worker_stop) return;
+        job = std::move(still_jobs.front());
+        still_jobs.pop_front();
+      }
+
+      const bool saved = save_jpeg_yuv420(job.path,
+                                          job.yuv420,
+                                          job.width,
+                                          job.height,
+                                          job.stride,
+                                          kStillJpegQuality,
+                                          &job.metadata);
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        capture_state = saved ? CaptureState::Saved : CaptureState::Failed;
+        capture_saved_resolution =
+            saved ? CameraResolution{job.width, job.height} : CameraResolution{};
+      }
+      capture_in_progress.store(false);
+      LOG_INFO(
+          "Still JPEG encode: requested={}x{} captured={}x{} encoded={}x{} fallback={} path={}",
+          job.requested_resolution.width,
+          job.requested_resolution.height,
+          job.width,
+          job.height,
+          job.width,
+          job.height,
+          job.width != job.requested_resolution.width ||
+              job.height != job.requested_resolution.height,
+          job.path);
+      if (!saved) LOG_WARN("Failed to encode still image: {}", job.path);
+    }
+  }
+
+  bool enqueue_still_job(StillEncodeJob job) {
+    std::lock_guard<std::mutex> lock(still_mutex);
+    constexpr size_t kMaxStillJobs = 2;
+    if (still_jobs.size() >= kMaxStillJobs || !still_worker_running || still_worker_stop) {
+      return false;
+    }
+    still_jobs.push_back(std::move(job));
+    still_cv.notify_one();
+    return true;
+  }
+
+  bool capture_stop_requested() {
+    std::lock_guard<std::mutex> lock(capture_mutex);
+    return capture_worker_stop;
+  }
+
+  void mark_capture_failed() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (capture_state == CaptureState::Requested) {
+      capture_state            = CaptureState::Failed;
+      capture_saved_resolution = {};
+    }
+  }
+
+  void perform_capture_cycle() {
+    CameraResolution requested_resolution;
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      requested_resolution = capture_output_resolution;
+    }
+
+    bool capture_started = false;
+    for (CameraResolution candidate : capture_resolution_candidates(requested_resolution)) {
+      if (capture_stop_requested()) break;
+      LOG_INFO("Switching camera to still mode: requested={}x{}",
+               candidate.width,
+               candidate.height);
+      if (start_still_stream(candidate)) {
+        capture_started = true;
+        break;
+      }
+    }
+
+    bool frame_ok = false;
+    if (capture_started) {
+      std::unique_lock<std::mutex> lock(capture_mutex);
+      const bool completed = capture_cv.wait_for(lock, kStillCaptureTimeout, [this] {
+        return capture_worker_stop || capture_frame_done;
+      });
+      frame_ok             = completed && capture_frame_done && capture_frame_ok;
+      if (!completed) {
+        LOG_ERROR("Timed out waiting for full-resolution still frame");
+      }
+    }
+
+    release_stream_resources();
+
+    bool preview_restored = false;
+    if (!capture_stop_requested()) {
+      preview_restored = start_preview_stream();
+      if (!preview_restored) {
+        LOG_ERROR("Failed to restore camera preview after still capture");
+      }
+    }
+
+    if (!frame_ok) {
+      mark_capture_failed();
+    }
+    if (!preview_restored && !capture_stop_requested()) {
+      opened.store(false);
+    }
+    if (!frame_ok) {
+      capture_in_progress.store(false);
+    }
+  }
+
+  void capture_loop() {
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(capture_mutex);
+        capture_cv.wait(lock, [this] { return capture_worker_stop || capture_job_pending; });
+        if (capture_worker_stop) return;
+        capture_job_pending = false;
+        capture_frame_done  = false;
+        capture_frame_ok    = false;
+        still_stability.reset();
+      }
+      perform_capture_cycle();
+    }
+  }
+
+  void start_capture_worker() {
+    std::lock_guard<std::mutex> lock(capture_mutex);
+    if (capture_worker_running) return;
+    capture_worker_stop = false;
+    capture_job_pending = false;
+    capture_frame_done  = false;
+    capture_frame_ok    = false;
+    still_stability.reset();
+    capture_worker_running = true;
+    capture_worker         = std::thread([this] { capture_loop(); });
+  }
+
+  void stop_capture_worker() {
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      if (!capture_worker_running) return;
+      capture_worker_stop = true;
+    }
+    capture_cv.notify_all();
+    if (capture_worker.joinable()) capture_worker.join();
+    std::lock_guard<std::mutex> lock(capture_mutex);
+    capture_job_pending = false;
+    capture_frame_done  = false;
+    capture_frame_ok    = false;
+    still_stability.reset();
+    capture_worker_running = false;
+    capture_in_progress.store(false);
+  }
+
   static bool is_supported(const libcamera::PixelFormat& format) {
     return format == libcamera::formats::YUV420 || format == libcamera::formats::YUYV ||
            format == libcamera::formats::UYVY || format == libcamera::formats::RGB565 ||
@@ -312,118 +645,197 @@ struct LibcameraBackend::Impl {
            format == libcamera::formats::XRGB8888 || format == libcamera::formats::XBGR8888;
   }
 
-  bool configure_stream(CameraResolution resolution, unsigned int buffer_count) {
-    config = camera->generateConfiguration(
-        {libcamera::StreamRole::Viewfinder, libcamera::StreamRole::StillCapture});
-    if (!config || config->size() < 2) {
-      last_error = "Camera configuration generation failed";
+  void update_scaler_crop_max() {
+    const auto crop_max = camera->properties().get(libcamera::properties::ScalerCropMaximum);
+    scaler_crop_max =
+        crop_max ? *crop_max : libcamera::Rectangle(0, 0, kSensorMaxWidth, kSensorMaxHeight);
+  }
+
+  bool configure_preview_stream() {
+    config = camera->generateConfiguration({libcamera::StreamRole::Viewfinder});
+    if (!config || config->size() != 1) {
+      last_error = "Camera preview configuration generation failed";
       LOG_ERROR("{}", last_error);
       return false;
     }
 
-    libcamera::StreamConfiguration& preview_cfg = config->at(0);
     config->orientation                         = libcamera::Orientation::Rotate180;
+    libcamera::StreamConfiguration& preview_cfg = config->at(0);
     preview_cfg.size.width                      = kPreviewWidth;
     preview_cfg.size.height                     = kPreviewHeight;
     preview_cfg.pixelFormat                     = libcamera::formats::RGB565;
-    preview_cfg.bufferCount                     = buffer_count;
-
-    libcamera::StreamConfiguration& still_cfg = config->at(1);
-    still_cfg.size.width                      = static_cast<unsigned int>(resolution.width);
-    still_cfg.size.height                     = static_cast<unsigned int>(resolution.height);
-    still_cfg.pixelFormat                     = libcamera::formats::YUV420;
-    still_cfg.bufferCount                     = 1;
+    preview_cfg.bufferCount                     = kPreviewBufferCount;
 
     if (config->validate() == libcamera::CameraConfiguration::Invalid) {
-      last_error = "Invalid camera configuration";
-      LOG_WARN("{}: {}x{} buffers={}",
-               last_error,
-               resolution.width,
-               resolution.height,
-               buffer_count);
-      return false;
-    }
-
-    pipeline_rotation = config->orientation == libcamera::Orientation::Rotate180;
-    LOG_INFO("Camera orientation: requested=Rotate180 pipeline={}", pipeline_rotation);
-
-    if (camera->configure(config.get())) {
-      last_error = "Camera configure failed";
-      LOG_WARN("{}: {}x{} buffers={}",
-               last_error,
-               resolution.width,
-               resolution.height,
-               buffer_count);
-      return false;
-    }
-
-    libcamera::StreamConfiguration& active_preview_cfg = config->at(0);
-    libcamera::StreamConfiguration& active_still_cfg   = config->at(1);
-    if (!is_supported(active_preview_cfg.pixelFormat) ||
-        !is_supported(active_still_cfg.pixelFormat)) {
-      last_error =
-          "Unsupported camera stream format: preview=" + active_preview_cfg.pixelFormat.toString() +
-          " still=" + active_still_cfg.pixelFormat.toString();
+      last_error = "Invalid camera preview configuration";
       LOG_WARN("{}", last_error);
       return false;
     }
 
-    preview_stream = active_preview_cfg.stream();
-    still_stream   = active_still_cfg.stream();
-    preview_w      = static_cast<int>(active_preview_cfg.size.width);
-    preview_h      = static_cast<int>(active_preview_cfg.size.height);
-    preview_stride = static_cast<int>(active_preview_cfg.stride);
-    preview_format = active_preview_cfg.pixelFormat;
-    still_w        = static_cast<int>(active_still_cfg.size.width);
-    still_h        = static_cast<int>(active_still_cfg.size.height);
-    still_stride   = static_cast<int>(active_still_cfg.stride);
-    still_format   = active_still_cfg.pixelFormat;
-
-    const auto crop_max = camera->properties().get(libcamera::properties::ScalerCropMaximum);
-    scaler_crop_max =
-        crop_max ? *crop_max : libcamera::Rectangle(0, 0, kSensorMaxWidth, kSensorMaxHeight);
-
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      pending_frame.width  = kPreviewWidth;
-      pending_frame.height = kPreviewHeight;
-      pending_frame.rgb565 = std::make_shared<std::vector<uint16_t>>(
-          kPreviewWidth * kPreviewHeight, 0);
-    }
-
-    allocator                   = std::make_unique<libcamera::FrameBufferAllocator>(camera);
-    const int preview_allocated = allocator->allocate(preview_stream);
-    const int still_allocated   = allocator->allocate(still_stream);
-    if (preview_allocated < 0 || still_allocated < 0) {
-      last_error = "Camera framebuffer allocation failed";
-      LOG_WARN("{}: preview={}x{} still={}x{} buffers={}",
-               last_error,
-               preview_w,
-               preview_h,
-               still_w,
-               still_h,
-               buffer_count);
-      allocator.reset();
+    pipeline_rotation = config->orientation == libcamera::Orientation::Rotate180;
+    if (camera->configure(config.get())) {
+      last_error = "Camera preview configure failed";
+      LOG_WARN("{}", last_error);
       return false;
     }
 
-    if (allocator->buffers(preview_stream).empty() || allocator->buffers(still_stream).empty()) {
-      last_error = "Camera framebuffer allocation returned no buffers";
-      LOG_WARN("{}: preview={}x{} still={}x{}", last_error, preview_w, preview_h, still_w, still_h);
-      allocator.reset();
+    libcamera::StreamConfiguration& active = config->at(0);
+    if (!is_supported(active.pixelFormat)) {
+      last_error = "Unsupported camera preview format: " + active.pixelFormat.toString();
+      LOG_WARN("{}", last_error);
       return false;
     }
 
+    preview_stream = active.stream();
+    preview_w      = static_cast<int>(active.size.width);
+    preview_h      = static_cast<int>(active.size.height);
+    preview_stride = static_cast<int>(active.stride);
+    preview_format = active.pixelFormat;
+    update_scaler_crop_max();
+
+    if (!allocate_capture_buffers(active, "camera-preview")) {
+      last_error = "Camera preview dma-heap framebuffer allocation failed";
+      frame_buffers.clear();
+      return false;
+    }
+
+    const uint64_t bytes = static_cast<uint64_t>(active.frameSize) * active.bufferCount;
+    LOG_INFO("Camera CMA buffers: mode=preview heap={} frame_size={} buffers={} total_bytes={}",
+             kCameraDmaHeapPath,
+             active.frameSize,
+             active.bufferCount,
+             bytes);
+    return true;
+  }
+
+  bool configure_still_stream(CameraResolution resolution) {
+    config = camera->generateConfiguration(
+        {libcamera::StreamRole::StillCapture, libcamera::StreamRole::Raw});
+    if (!config || config->size() != 2) {
+      last_error = "Camera still/raw configuration generation failed";
+      LOG_ERROR("{}", last_error);
+      return false;
+    }
+
+    config->orientation                       = libcamera::Orientation::Rotate180;
+    libcamera::StreamConfiguration& still_cfg = config->at(0);
+    still_cfg.size.width                      = static_cast<unsigned int>(resolution.width);
+    still_cfg.size.height                     = static_cast<unsigned int>(resolution.height);
+    still_cfg.pixelFormat                     = libcamera::formats::YUV420;
+    still_cfg.bufferCount                     = kCaptureBufferCount;
+
+    // As in rpicam-still, an external mandatory RAW stream both selects the sensor mode and
+    // removes the need for the VC4 pipeline to allocate its four internal Unicam RAW buffers.
+    libcamera::StreamConfiguration& raw_cfg = config->at(1);
+    raw_cfg.size.width                      = static_cast<unsigned int>(resolution.width);
+    raw_cfg.size.height                     = static_cast<unsigned int>(resolution.height);
+    raw_cfg.pixelFormat                     = libcamera::formats::SBGGR10_CSI2P;
+    raw_cfg.bufferCount                     = kCaptureBufferCount;
+    config->sensorConfig                    = libcamera::SensorConfiguration();
+    config->sensorConfig->outputSize        = raw_cfg.size;
+    config->sensorConfig->bitDepth          = kSensorRawBitDepth;
+
+    if (config->validate() == libcamera::CameraConfiguration::Invalid) {
+      last_error = "Invalid camera still/raw configuration";
+      LOG_WARN("{}: requested={}x{}", last_error, resolution.width, resolution.height);
+      return false;
+    }
+
+    pipeline_rotation = config->orientation == libcamera::Orientation::Rotate180;
+    if (camera->configure(config.get())) {
+      last_error = "Camera still/raw configure failed";
+      LOG_WARN("{}: requested={}x{}", last_error, resolution.width, resolution.height);
+      return false;
+    }
+
+    libcamera::StreamConfiguration& active_still = config->at(0);
+    libcamera::StreamConfiguration& active_raw   = config->at(1);
+    if (!is_supported(active_still.pixelFormat)) {
+      last_error = "Unsupported camera still format: " + active_still.pixelFormat.toString();
+      LOG_WARN("{}", last_error);
+      return false;
+    }
+
+    still_stream = active_still.stream();
+    raw_stream   = active_raw.stream();
+    still_w      = static_cast<int>(active_still.size.width);
+    still_h      = static_cast<int>(active_still.size.height);
+    still_stride = static_cast<int>(active_still.stride);
+    still_format = active_still.pixelFormat;
+    update_scaler_crop_max();
+
+    if (!allocate_capture_buffers(active_still, "camera-still") ||
+        !allocate_capture_buffers(active_raw, "camera-raw")) {
+      last_error = "Camera still/raw dma-heap framebuffer allocation failed";
+      frame_buffers.clear();
+      return false;
+    }
+
+    const uint64_t still_bytes =
+        static_cast<uint64_t>(active_still.frameSize) * active_still.bufferCount;
+    const uint64_t raw_bytes = static_cast<uint64_t>(active_raw.frameSize) * active_raw.bufferCount;
+    LOG_INFO(
+        "Camera CMA buffers: mode=still heap={} still={}x{} format={} frame_size={} buffers={} "
+        "raw={}x{} format={} frame_size={} buffers={} sensor={}x{} bit_depth={} total_bytes={}",
+        kCameraDmaHeapPath,
+        active_still.size.width,
+        active_still.size.height,
+        active_still.pixelFormat.toString(),
+        active_still.frameSize,
+        active_still.bufferCount,
+        active_raw.size.width,
+        active_raw.size.height,
+        active_raw.pixelFormat.toString(),
+        active_raw.frameSize,
+        active_raw.bufferCount,
+        config->sensorConfig ? config->sensorConfig->outputSize.width : 0,
+        config->sensorConfig ? config->sensorConfig->outputSize.height : 0,
+        config->sensorConfig ? config->sensorConfig->bitDepth : 0,
+        still_bytes + raw_bytes);
+    return true;
+  }
+
+  bool allocate_capture_buffers(const libcamera::StreamConfiguration& stream_config,
+                                const char* name_prefix) {
+    libcamera::Stream* stream = stream_config.stream();
+    if (!dma_heap.is_valid() || !stream || stream_config.frameSize == 0 ||
+        stream_config.bufferCount == 0) {
+      LOG_ERROR(
+          "Invalid dma-heap stream allocation: heap_valid={} stream={} frame_size={} buffers={}",
+          dma_heap.is_valid(),
+          static_cast<const void*>(stream),
+          stream_config.frameSize,
+          stream_config.bufferCount);
+      return false;
+    }
+
+    auto& buffers = frame_buffers[stream];
+    buffers.reserve(stream_config.bufferCount);
+    for (unsigned int i = 0; i < stream_config.bufferCount; ++i) {
+      const std::string name = std::string(name_prefix) + "-" + std::to_string(i);
+      libcamera::UniqueFD fd = dma_heap.allocate(name, stream_config.frameSize);
+      if (!fd.isValid()) {
+        return false;
+      }
+
+      std::vector<libcamera::FrameBuffer::Plane> planes(1);
+      planes[0].fd     = libcamera::SharedFD(std::move(fd));
+      planes[0].offset = 0;
+      planes[0].length = stream_config.frameSize;
+      buffers.push_back(std::make_unique<libcamera::FrameBuffer>(planes));
+    }
     return true;
   }
 
   void release_stream_resources() {
-    if (camera && streaming) {
+    const bool was_streaming = streaming.exchange(false);
+    stream_mode.store(StreamMode::Stopped);
+    if (camera) {
       camera->requestCompleted.disconnect(this);
-      streaming = false;
-      camera->stop();
+      if (was_streaming) {
+        camera->stop();
+      }
     }
-    streaming = false;
 
     requests.clear();
 
@@ -435,11 +847,10 @@ struct LibcameraBackend::Impl {
       }
     }
     mapped_buffers.clear();
-    preview_buffers.clear();
-    free_still_buffers.clear();
-    allocator.reset();
+    frame_buffers.clear();
     preview_stream = nullptr;
     still_stream   = nullptr;
+    raw_stream     = nullptr;
   }
 
   bool map_buffer(const libcamera::FrameBuffer* buffer) {
@@ -485,89 +896,110 @@ struct LibcameraBackend::Impl {
     return true;
   }
 
-  bool create_requests() {
-    for (const auto& buffer : allocator->buffers(preview_stream)) {
-      if (!map_buffer(buffer.get())) {
-        continue;
-      }
-      preview_buffers.push_back(buffer.get());
+  bool create_preview_requests() {
+    const auto preview_it = frame_buffers.find(preview_stream);
+    if (preview_it == frame_buffers.end()) {
+      last_error = "Camera preview dma-heap buffers are missing";
+      return false;
+    }
 
+    for (const auto& buffer : preview_it->second) {
+      if (!map_buffer(buffer.get())) {
+        last_error = "Camera preview dma-buf mmap failed";
+        return false;
+      }
       auto request = camera->createRequest();
       if (!request || request->addBuffer(preview_stream, buffer.get()) < 0) {
-        LOG_WARN("Camera request creation failed");
-        continue;
+        last_error = "Camera preview request creation failed";
+        return false;
       }
-
-      apply_request_controls(request.get());
+      apply_preview_request_controls(request.get());
       requests.push_back(std::move(request));
     }
-
-    for (const auto& buffer : allocator->buffers(still_stream)) {
-      if (!map_buffer(buffer.get())) {
-        continue;
-      }
-      free_still_buffers.push_back(buffer.get());
-    }
-
-    if (requests.empty()) {
-      last_error = "No camera requests created";
-      LOG_WARN("{}", last_error);
-      return false;
-    }
-    if (free_still_buffers.empty()) {
-      last_error = "No still capture buffers created";
-      LOG_WARN("{}", last_error);
-      return false;
-    }
-
     return true;
   }
 
-  bool start_stream(CameraResolution resolution, unsigned int buffer_count) {
-    release_stream_resources();
-
-    if (!configure_stream(resolution, buffer_count)) {
-      release_stream_resources();
+  bool create_still_request() {
+    const auto still_it = frame_buffers.find(still_stream);
+    const auto raw_it   = frame_buffers.find(raw_stream);
+    if (still_it == frame_buffers.end() || raw_it == frame_buffers.end() ||
+        still_it->second.size() != 1 || raw_it->second.size() != 1) {
+      last_error = "Camera still/raw dma-heap buffers are missing";
       return false;
     }
 
-    if (!create_requests()) {
-      release_stream_resources();
+    if (!map_buffer(still_it->second.front().get())) {
+      last_error = "Camera still dma-buf mmap failed";
       return false;
     }
 
+    auto request = camera->createRequest();
+    if (!request || request->addBuffer(still_stream, still_it->second.front().get()) < 0 ||
+        request->addBuffer(raw_stream, raw_it->second.front().get()) < 0) {
+      last_error = "Camera still/raw request creation failed";
+      return false;
+    }
+    requests.push_back(std::move(request));
+    return true;
+  }
+
+  bool start_configured_stream(StreamMode mode) {
     camera->requestCompleted.connect(this, &Impl::request_complete);
 
-    if (camera->start()) {
+    libcamera::ControlList still_controls;
+    const libcamera::ControlList* start_controls = nullptr;
+    if (mode == StreamMode::Still) {
+      still_controls = still_start_controls();
+      start_controls = &still_controls;
+    }
+    if (camera->start(start_controls)) {
       last_error = "Camera start failed";
-      LOG_WARN("{}: preview={}x{} still={}x{} buffers={}",
-               last_error,
-               preview_w,
-               preview_h,
-               still_w,
-               still_h,
-               buffer_count);
+      LOG_WARN("{}: mode={}", last_error, mode == StreamMode::Preview ? "preview" : "still");
       camera->requestCompleted.disconnect(this);
-      release_stream_resources();
       return false;
     }
 
-    streaming = true;
+    stream_mode.store(mode);
+    streaming.store(true);
     for (auto& request : requests) {
-      camera->queueRequest(request.get());
+      if (camera->queueRequest(request.get()) < 0) {
+        last_error = "Camera initial request queue failed";
+        LOG_ERROR("{}", last_error);
+        release_stream_resources();
+        return false;
+      }
     }
+    return true;
+  }
 
-    opened = true;
-    LOG_INFO(
-        "Camera streams started: preview={}x{} stride={} format={} still={}x{} stride={} format={}",
-        preview_w,
-        preview_h,
-        preview_stride,
-        preview_format.toString(),
-        still_w,
-        still_h,
-        still_stride,
-        still_format.toString());
+  bool start_preview_stream() {
+    release_stream_resources();
+    if (!configure_preview_stream() || !create_preview_requests() ||
+        !start_configured_stream(StreamMode::Preview)) {
+      release_stream_resources();
+      return false;
+    }
+    LOG_INFO("Camera preview started: {}x{} stride={} format={} buffers={}",
+             preview_w,
+             preview_h,
+             preview_stride,
+             preview_format.toString(),
+             kPreviewBufferCount);
+    return true;
+  }
+
+  bool start_still_stream(CameraResolution resolution) {
+    release_stream_resources();
+    if (!configure_still_stream(resolution) || !create_still_request() ||
+        !start_configured_stream(StreamMode::Still)) {
+      release_stream_resources();
+      return false;
+    }
+    LOG_INFO("Camera still capture started: {}x{} stride={} format={} raw_buffer=true",
+             still_w,
+             still_h,
+             still_stride,
+             still_format.toString());
     return true;
   }
 
@@ -608,6 +1040,18 @@ struct LibcameraBackend::Impl {
   }
 
   bool open() {
+    if (!dma_heap.is_valid()) {
+      last_error = std::string("Required camera dma-heap is unavailable: ") + kCameraDmaHeapPath;
+      LOG_ERROR("{}", last_error);
+      return false;
+    }
+
+    if (!configure_rpi_apps_pipeline()) {
+      last_error = "Required rpicam-apps pipeline configuration is unavailable";
+      return false;
+    }
+
+    start_still_worker();
     manager = std::make_unique<libcamera::CameraManager>();
     if (manager->start()) {
       last_error = "CameraManager start failed";
@@ -658,50 +1102,43 @@ struct LibcameraBackend::Impl {
       return false;
     }
 
-    bool started = false;
-    for (CameraResolution candidate : capture_resolution_candidates(capture_resolution)) {
-      LOG_INFO("Trying camera resolution {}x{}", candidate.width, candidate.height);
-      if (start_stream(candidate, kHighResolutionBufferCount)) {
-        started = true;
-        break;
-      }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      pending_frame.width  = kPreviewWidth;
+      pending_frame.height = kPreviewHeight;
+      pending_frame.rgb565 =
+          std::make_shared<std::vector<uint16_t>>(kPreviewWidth * kPreviewHeight, 0);
     }
 
-    if (!started) {
-      for (CameraResolution candidate : capture_resolution_candidates({1640, 1232})) {
-        LOG_INFO("Trying fallback camera resolution {}x{}", candidate.width, candidate.height);
-        if (start_stream(candidate, kFallbackBufferCount)) {
-          started = true;
-          break;
-        }
-      }
-    }
-
-    if (!started) {
+    if (!start_preview_stream()) {
       if (last_error.empty()) {
-        last_error = "Camera stream configuration failed";
+        last_error = "Camera preview stream configuration failed";
       }
       LOG_ERROR("{}", last_error);
       close();
       return false;
     }
+    opened.store(true);
+    start_capture_worker();
     return true;
   }
 
   void close() {
+    opened.store(false);
     (void)stop_video_recording();
+    stop_capture_worker();
     if (camera) {
       release_stream_resources();
       camera->release();
       camera.reset();
     }
 
+    stop_still_worker();
+
     if (manager) {
       manager->stop();
       manager.reset();
     }
-
-    opened = false;
   }
 
   bool consume_frame(CameraFrame& frame) {
@@ -715,22 +1152,50 @@ struct LibcameraBackend::Impl {
   }
 
   bool request_capture() {
-    if (!opened || !streaming) {
+    if (!opened.load() || !streaming.load() || stream_mode.load() != StreamMode::Preview) {
       return false;
     }
 
+    std::lock_guard<std::mutex> video_lock(video_mutex);
+    if (video_writer.is_open()) {
+      last_error = "Still capture is unavailable while video recording is active";
+      LOG_WARN("{}", last_error);
+      return false;
+    }
+
+    bool expected = false;
+    if (!capture_in_progress.compare_exchange_strong(expected, true)) {
+      return false;
+    }
+
+    CameraResolution requested_resolution;
     {
       std::lock_guard<std::mutex> lock(mutex);
-      last_capture_path = make_photo_path();
-      capture_state     = CaptureState::Requested;
+      last_capture_path            = make_photo_path();
+      capture_state                = CaptureState::Requested;
+      capture_saved_resolution     = {};
+      requested_resolution         = capture_resolution;
+      capture_requested_resolution = requested_resolution;
     }
-    capture_requested = true;
+
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      if (!capture_worker_running || capture_worker_stop) {
+        capture_in_progress.store(false);
+        mark_capture_failed();
+        return false;
+      }
+      capture_output_resolution = requested_resolution;
+      capture_job_pending       = true;
+    }
+    capture_cv.notify_one();
     return true;
   }
 
   bool start_video_recording(int fps, int quality) {
     std::lock_guard<std::mutex> video_lock(video_mutex);
-    if (!opened || !streaming || preview_w <= 0 || preview_h <= 0) {
+    if (!opened.load() || !streaming.load() || stream_mode.load() != StreamMode::Preview ||
+        capture_in_progress.load() || preview_w <= 0 || preview_h <= 0) {
       video_state = VideoState::Failed;
       last_error  = "Camera preview stream is not ready for video recording";
       return false;
@@ -777,6 +1242,7 @@ struct LibcameraBackend::Impl {
   }
 
   void set_capture_resolution(CameraResolution resolution) {
+    std::lock_guard<std::mutex> lock(mutex);
     capture_resolution.width  = clamp_int(resolution.width, 1, kSensorMaxWidth);
     capture_resolution.height = clamp_int(resolution.height, 1, kSensorMaxHeight);
   }
@@ -826,25 +1292,36 @@ struct LibcameraBackend::Impl {
                                     : scaler_crop_max;
   }
 
-  void apply_request_controls(libcamera::Request* request, bool full_resolution_still = false) {
+  void apply_preview_request_controls(libcamera::Request* request) {
     if (!request) {
       return;
     }
-
-    if (full_resolution_still) {
-      request->controls().set(libcamera::controls::ScalerCrop, full_scaler_crop());
-    } else {
-      const CameraZoomState state = current_zoom_state();
-      request->controls().set(libcamera::controls::ScalerCrop, scaler_crop_for_zoom_state(state));
-    }
+    const CameraZoomState state = current_zoom_state();
+    request->controls().set(libcamera::controls::ScalerCrop, scaler_crop_for_zoom_state(state));
     request->controls().set(libcamera::controls::FrameDurationLimits,
                             {kPreviewMinFrameDurationUs, kPreviewMaxFrameDurationUs});
+  }
+
+  libcamera::ControlList still_start_controls() const {
+    libcamera::ControlList controls(camera->controls());
+    controls.set(libcamera::controls::ScalerCrop, full_scaler_crop());
+    controls.set(libcamera::controls::FrameDurationLimits,
+                 {kStillMinFrameDurationUs, kStillMaxFrameDurationUs});
+    controls.set(libcamera::controls::AeMeteringMode, libcamera::controls::MeteringCentreWeighted);
+    controls.set(libcamera::controls::AwbMode, libcamera::controls::AwbAuto);
+    controls.set(libcamera::controls::Brightness, 0.0f);
+    controls.set(libcamera::controls::Contrast, 1.0f);
+    controls.set(libcamera::controls::Saturation, 1.0f);
+    controls.set(libcamera::controls::Sharpness, 1.0f);
+    controls.set(libcamera::controls::draft::NoiseReductionMode,
+                 libcamera::controls::draft::NoiseReductionModeHighQuality);
+    return controls;
   }
 
   ExifMetadata build_still_exif_metadata(const libcamera::Request* request, int width, int height) {
     ExifMetadata metadata         = make_default_exif_metadata(width, height);
     metadata.model                = "CardputerZero IMX219";
-    metadata.software             = "Camera 0.3.5";
+    metadata.software             = "Camera 0.3.6";
     metadata.f_number_x100        = 200;
     metadata.focal_length_mm_x100 = 285;
     metadata.lens_make            = "M5Stack";
@@ -1121,16 +1598,80 @@ struct LibcameraBackend::Impl {
     return metadata;
   }
 
-  CaptureState consume_capture_state(std::string* path) {
+  CaptureResult consume_capture_result() {
     std::lock_guard<std::mutex> lock(mutex);
-    const CaptureState state = capture_state;
-    if (path) {
-      *path = last_capture_path;
-    }
+    CaptureResult result;
+    result.state                = capture_state;
+    result.path                 = last_capture_path;
+    result.requested_resolution = capture_requested_resolution;
+    result.saved_resolution     = capture_saved_resolution;
     if (capture_state == CaptureState::Saved || capture_state == CaptureState::Failed) {
       capture_state = CaptureState::Idle;
     }
-    return state;
+    return result;
+  }
+
+  struct StillFrameDecision : StillFrameStabilityDecision {
+    int ae_state{-1};
+    int awb_state{-1};
+    float red_gain{-1.0f};
+    float blue_gain{-1.0f};
+  };
+
+  StillFrameDecision evaluate_still_frame(const libcamera::ControlList& metadata) {
+    StillFrameDecision decision;
+    const auto ae_state     = metadata.get(libcamera::controls::AeState);
+    const auto awb_state    = metadata.get(libcamera::controls::draft::AwbState);
+    const auto colour_gains = metadata.get(libcamera::controls::ColourGains);
+
+    StillFrameStabilitySample sample;
+    decision.ae_state          = ae_state.value_or(-1);
+    decision.awb_state         = awb_state.value_or(-1);
+    sample.ae_state_available  = ae_state.has_value();
+    sample.ae_converged        = decision.ae_state == libcamera::controls::AeStateConverged;
+    sample.awb_state_available = awb_state.has_value();
+    sample.awb_converged       = decision.awb_state == libcamera::controls::draft::AwbConverged ||
+                                 decision.awb_state == libcamera::controls::draft::AwbLocked;
+    if (colour_gains) {
+      decision.red_gain             = (*colour_gains)[0];
+      decision.blue_gain            = (*colour_gains)[1];
+      sample.colour_gains_available = true;
+      sample.red_gain               = decision.red_gain;
+      sample.blue_gain              = decision.blue_gain;
+    }
+
+    std::lock_guard<std::mutex> lock(capture_mutex);
+    static_cast<StillFrameStabilityDecision&>(decision) = still_stability.evaluate(sample);
+    return decision;
+  }
+
+  void finish_still_frame(bool frame_ok) {
+    {
+      std::lock_guard<std::mutex> lock(capture_mutex);
+      capture_frame_ok   = frame_ok;
+      capture_frame_done = true;
+    }
+    capture_cv.notify_one();
+  }
+
+  bool requeue_still_request(libcamera::Request* request,
+                             libcamera::FrameBuffer* still_buffer,
+                             libcamera::FrameBuffer* raw_buffer) {
+    if (!request || !still_buffer || !raw_buffer) {
+      return false;
+    }
+    request->reuse();
+    if (request->addBuffer(still_stream, still_buffer) < 0 ||
+        request->addBuffer(raw_stream, raw_buffer) < 0) {
+      LOG_ERROR("Failed to re-add still/raw buffers while waiting for 3A");
+      return false;
+    }
+    if (!camera || !streaming.load() || stream_mode.load() != StreamMode::Still ||
+        camera->queueRequest(request) < 0) {
+      LOG_ERROR("Failed to requeue still request while waiting for 3A");
+      return false;
+    }
+    return true;
   }
 
   void request_complete(libcamera::Request* request) {
@@ -1138,13 +1679,67 @@ struct LibcameraBackend::Impl {
       return;
     }
 
-    if (!streaming) {
+    if (!streaming.load()) {
       return;
     }
 
-    const bool has_still = request->buffers().find(still_stream) != request->buffers().end();
+    const StreamMode mode = stream_mode.load();
+    if (mode == StreamMode::Still) {
+      libcamera::FrameBuffer* still_buffer =
+          still_stream ? request->findBuffer(still_stream) : nullptr;
+      libcamera::FrameBuffer* raw_buffer = raw_stream ? request->findBuffer(raw_stream) : nullptr;
+      if (!still_buffer || !raw_buffer) {
+        finish_still_frame(false);
+        return;
+      }
+      if (still_buffer->metadata().status != libcamera::FrameMetadata::FrameSuccess ||
+          raw_buffer->metadata().status != libcamera::FrameMetadata::FrameSuccess) {
+        LOG_INFO("Ignoring non-success still frame: still_status={} raw_status={}",
+                 static_cast<int>(still_buffer->metadata().status),
+                 static_cast<int>(raw_buffer->metadata().status));
+        if (!requeue_still_request(request, still_buffer, raw_buffer)) {
+          finish_still_frame(false);
+        }
+        return;
+      }
+
+      const StillFrameDecision decision = evaluate_still_frame(request->metadata());
+      LOG_INFO(
+          "Still 3A settle: frame={} ae_state={} awb_state={} gains=[{:.4f},{:.4f}] "
+          "gain_delta={:.4f} stable_gain_frames={} capture={} forced={}",
+          decision.frame,
+          decision.ae_state,
+          decision.awb_state,
+          decision.red_gain,
+          decision.blue_gain,
+          decision.gain_delta,
+          decision.stable_gain_frames,
+          decision.capture,
+          decision.forced);
+      if (!decision.capture) {
+        if (!requeue_still_request(request, still_buffer, raw_buffer)) {
+          finish_still_frame(false);
+        }
+        return;
+      }
+
+      const bool frame_ok = still_buffer && process_completed_stream_buffer(request,
+                                                                            still_stream,
+                                                                            still_w,
+                                                                            still_h,
+                                                                            still_stride,
+                                                                            still_format,
+                                                                            true);
+      finish_still_frame(frame_ok);
+      return;
+    }
+
+    if (mode != StreamMode::Preview || !preview_stream) {
+      return;
+    }
+
     libcamera::FrameBuffer* preview_buffer = request->findBuffer(preview_stream);
-    if (!has_still) {
+    if (preview_buffer) {
       process_completed_stream_buffer(request,
                                       preview_stream,
                                       preview_w,
@@ -1153,43 +1748,21 @@ struct LibcameraBackend::Impl {
                                       preview_format,
                                       false);
     }
-    if (has_still) {
-      process_completed_stream_buffer(request,
-                                      still_stream,
-                                      still_w,
-                                      still_h,
-                                      still_stride,
-                                      still_format,
-                                      true);
-    }
 
     request->reuse();
     if (preview_buffer && request->addBuffer(preview_stream, preview_buffer) < 0) {
       LOG_WARN("Failed to re-add preview buffer");
       return;
     }
+    apply_preview_request_controls(request);
 
-    bool queue_still_capture = false;
-    if (capture_requested.exchange(false) && !free_still_buffers.empty()) {
-      libcamera::FrameBuffer* still_buffer = free_still_buffers.back();
-      free_still_buffers.pop_back();
-      if (request->addBuffer(still_stream, still_buffer) < 0) {
-        free_still_buffers.push_back(still_buffer);
-        std::lock_guard<std::mutex> lock(mutex);
-        capture_state = CaptureState::Failed;
-      } else {
-        queue_still_capture = true;
-      }
-    }
-
-    apply_request_controls(request, queue_still_capture);
-
-    if (camera && streaming) {
-      camera->queueRequest(request);
+    if (camera && streaming.load() && stream_mode.load() == StreamMode::Preview &&
+        camera->queueRequest(request) < 0) {
+      LOG_ERROR("Failed to requeue camera request");
     }
   }
 
-  void process_completed_stream_buffer(libcamera::Request* request,
+  bool process_completed_stream_buffer(libcamera::Request* request,
                                        libcamera::Stream* completed_stream,
                                        int width,
                                        int height,
@@ -1197,17 +1770,17 @@ struct LibcameraBackend::Impl {
                                        const libcamera::PixelFormat& format,
                                        bool is_still) {
     if (!request || !completed_stream) {
-      return;
+      return false;
     }
 
     auto buffer_it = request->buffers().find(completed_stream);
     if (buffer_it == request->buffers().end()) {
-      return;
+      return false;
     }
     libcamera::FrameBuffer* buffer = buffer_it->second;
     auto map_it                    = mapped_buffers.find(buffer);
     if (map_it == mapped_buffers.end()) {
-      return;
+      return false;
     }
 
     const auto& mapped = map_it->second;
@@ -1231,68 +1804,82 @@ struct LibcameraBackend::Impl {
       }
     }
 
-    for (const auto& plane : mapped.planes) {
-      sync_dma_buf(plane.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    DmaBufReadGuard read_guard(mapped);
+    if (!read_guard.is_valid()) {
+      return false;
+    }
+
+    if (is_still) {
+      if (format != libcamera::formats::YUV420 || !pipeline_rotation || plane_data.size() != 1) {
+        LOG_ERROR("Still frame is not contiguous oriented YUV420: format={} planes={} rotated={}",
+                  format.toString(),
+                  plane_data.size(),
+                  pipeline_rotation);
+        return false;
+      }
+      const size_t yuv_size = static_cast<size_t>(stride) * height * 3 / 2;
+      if (stride < width || bytes_used[0] < yuv_size) {
+        LOG_ERROR("Still YUV420 buffer is too small: bytes={} required={} stride={}",
+                  bytes_used[0],
+                  yuv_size,
+                  stride);
+        return false;
+      }
+
+      std::string capture_path;
+      CameraResolution requested_resolution;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        capture_path = last_capture_path;
+      }
+      {
+        std::lock_guard<std::mutex> lock(capture_mutex);
+        requested_resolution = capture_output_resolution;
+      }
+      StillEncodeJob job;
+      job.yuv420.assign(plane_data[0], plane_data[0] + yuv_size);
+      job.width                = width;
+      job.height               = height;
+      job.stride               = stride;
+      job.path                 = std::move(capture_path);
+      job.requested_resolution = requested_resolution;
+      job.metadata             = build_still_exif_metadata(request, width, height);
+      if (!enqueue_still_job(std::move(job))) {
+        std::lock_guard<std::mutex> lock(mutex);
+        capture_state = CaptureState::Failed;
+        LOG_WARN("Still encode queue is full or worker is stopped");
+        return false;
+      }
+      return true;
     }
 
     CameraFrame converted_frame;
-    if (!is_still) {
+    {
       ++preview_input_frames;
       converted_frame.width  = width;
       converted_frame.height = height;
       converted_frame.rgb565 = preview_pool.acquire(static_cast<size_t>(width) * height);
       if (!converted_frame.rgb565) {
         ++preview_dropped_frames;
-        for (const auto& plane : mapped.planes) {
-          sync_dma_buf(plane.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
-        }
-        return;
+        return false;
       }
     }
-    std::vector<uint8_t> converted_still;
     const auto convert_started = std::chrono::steady_clock::now();
-    const bool converted = convert_frame_to_outputs(plane_data,
-                                                     bytes_used,
-                                                     width,
-                                                     height,
-                                                     stride,
-                                                     map_libcamera_format(format),
-                                                     is_still,
-                                                     is_still ? nullptr : &converted_frame,
-                                                     is_still ? &converted_still : nullptr,
-                                                     !pipeline_rotation);
-    if (!is_still) {
-      preview_convert_us += static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now() - convert_started)
-              .count());
-    }
-    if (converted && is_still) {
-      std::string capture_path;
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        capture_path = last_capture_path;
-      }
-      std::vector<uint8_t> resized_still;
-      const bool resized = resize_rgb888(converted_still,
-                                         width,
-                                         height,
-                                         capture_resolution.width,
-                                         capture_resolution.height,
-                                         resized_still);
-      const ExifMetadata exif_metadata = build_still_exif_metadata(
-          request, capture_resolution.width, capture_resolution.height);
-      const bool saved = resized && save_jpeg_rgb888(capture_path,
-                                                     resized_still,
-                                                     capture_resolution.width,
-                                                     capture_resolution.height,
-                                                     92,
-                                                     &exif_metadata);
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        capture_state = saved ? CaptureState::Saved : CaptureState::Failed;
-      }
-    } else if (converted) {
+    const bool converted       = convert_frame_to_outputs(plane_data,
+                                                          bytes_used,
+                                                          width,
+                                                          height,
+                                                          stride,
+                                                          map_libcamera_format(format),
+                                                          false,
+                                                          &converted_frame,
+                                                          nullptr,
+                                                          !pipeline_rotation);
+    preview_convert_us +=
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - convert_started)
+                                  .count());
+    if (converted) {
       bool video_failed = false;
       {
         std::lock_guard<std::mutex> video_lock(video_mutex);
@@ -1303,8 +1890,8 @@ struct LibcameraBackend::Impl {
         }
       }
       std::lock_guard<std::mutex> lock(mutex);
-      pending_frame = std::move(converted_frame);
-      new_frame     = true;
+      pending_frame            = std::move(converted_frame);
+      new_frame                = true;
       const uint64_t published = ++preview_published_frames;
       if (video_failed) {
         video_state = VideoState::Failed;
@@ -1318,14 +1905,7 @@ struct LibcameraBackend::Impl {
                  input ? preview_convert_us.load() / input : 0);
       }
     }
-
-    for (const auto& plane : mapped.planes) {
-      sync_dma_buf(plane.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
-    }
-
-    if (is_still) {
-      free_still_buffers.push_back(buffer);
-    }
+    return converted;
   }
 #endif
 };
@@ -1402,14 +1982,11 @@ void LibcameraBackend::set_zoom_state(CameraZoomState state) {
 #endif
 }
 
-CaptureState LibcameraBackend::consume_capture_state(std::string* path) {
+CaptureResult LibcameraBackend::consume_capture_result() {
 #if USE_DESKTOP
-  if (path) {
-    path->clear();
-  }
-  return CaptureState::Idle;
+  return {};
 #else
-  return impl_->consume_capture_state(path);
+  return impl_->consume_capture_result();
 #endif
 }
 

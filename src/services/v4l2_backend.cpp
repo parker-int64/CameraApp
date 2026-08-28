@@ -257,8 +257,8 @@ ControlSnapshot find_named_control(int fd,
                                    const std::vector<std::string>& needles,
                                    const std::string& key) {
   for (const auto& control : controls) {
-    const std::string haystack = lower_string(control.driver_name.empty() ? control.key
-                                                                          : control.driver_name);
+    const std::string haystack =
+        lower_string(control.driver_name.empty() ? control.key : control.driver_name);
     const bool matched = std::any_of(needles.begin(), needles.end(), [&haystack](const auto& item) {
       return haystack.find(item) != std::string::npos;
     });
@@ -297,23 +297,19 @@ std::string build_control_diagnostics(int fd) {
       query_control_snapshot(fd, V4L2_CID_EXPOSURE_AUTO, "exposure_auto");
   const ControlSnapshot exposure =
       query_control_snapshot(fd, V4L2_CID_EXPOSURE_ABSOLUTE, "exposure");
-  const ControlSnapshot legacy_exposure = exposure.supported
-                                              ? exposure
-                                              : query_control_snapshot(fd, V4L2_CID_EXPOSURE, "exposure");
-  const ControlSnapshot auto_gain = query_control_snapshot(fd, V4L2_CID_AUTOGAIN, "auto_gain");
-  const ControlSnapshot gain      = query_control_snapshot(fd, V4L2_CID_GAIN, "gain");
+  const ControlSnapshot legacy_exposure =
+      exposure.supported ? exposure : query_control_snapshot(fd, V4L2_CID_EXPOSURE, "exposure");
+  const ControlSnapshot auto_gain  = query_control_snapshot(fd, V4L2_CID_AUTOGAIN, "auto_gain");
+  const ControlSnapshot gain       = query_control_snapshot(fd, V4L2_CID_GAIN, "gain");
   const ControlSnapshot focus_auto = query_control_snapshot(fd, V4L2_CID_FOCUS_AUTO, "focus_auto");
-  const ControlSnapshot focus = query_control_snapshot(fd, V4L2_CID_FOCUS_ABSOLUTE, "focus");
+  const ControlSnapshot focus      = query_control_snapshot(fd, V4L2_CID_FOCUS_ABSOLUTE, "focus");
   const ControlSnapshot auto_wb =
       query_control_snapshot(fd, V4L2_CID_AUTO_WHITE_BALANCE, "auto_wb");
   const ControlSnapshot wb =
       query_control_snapshot(fd, V4L2_CID_WHITE_BALANCE_TEMPERATURE, "white_balance");
   const ControlSnapshot sharpness = query_control_snapshot(fd, V4L2_CID_SHARPNESS, "sharpness");
   const ControlSnapshot denoise =
-      find_named_control(fd,
-                         controls,
-                         {"denoise", "noise reduction", "noise", "nr"},
-                         "denoise");
+      find_named_control(fd, controls, {"denoise", "noise reduction", "noise", "nr"}, "denoise");
 
   std::ostringstream out;
   out << "Exp " << snapshot_value_text(legacy_exposure);
@@ -552,8 +548,8 @@ bool rgb888_to_scaled_preview_frame(const std::vector<uint8_t>& rgb,
   const int out_height = kPreviewOutputHeight;
   const CropRect crop =
       preview_crop_for_source(src_width, src_height, out_width, out_height, zoom_state);
-  frame.width  = out_width;
-  frame.height = out_height;
+  frame.width              = out_width;
+  frame.height             = out_height;
   const size_t pixel_count = static_cast<size_t>(out_width) * out_height;
   if (!frame.rgb565) {
     frame.rgb565 = std::make_shared<std::vector<uint16_t>>();
@@ -604,9 +600,9 @@ bool yuv422_to_scaled_preview_frame(const uint8_t* data,
   const int out_height = kPreviewOutputHeight;
   const CropRect crop =
       preview_crop_for_source(src_width, src_height, out_width, out_height, zoom_state);
-  const bool is_yuyv = pixel_format == V4L2_PIX_FMT_YUYV;
-  frame.width        = out_width;
-  frame.height       = out_height;
+  const bool is_yuyv       = pixel_format == V4L2_PIX_FMT_YUYV;
+  frame.width              = out_width;
+  frame.height             = out_height;
   const size_t pixel_count = static_cast<size_t>(out_width) * out_height;
   if (!frame.rgb565) {
     frame.rgb565 = std::make_shared<std::vector<uint16_t>>();
@@ -998,8 +994,8 @@ struct V4l2Backend::Impl {
       LOG_INFO("V4L2 still {} control is unavailable: {}", name, std::strerror(errno));
       return;
     }
-    if (query.flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY |
-                       V4L2_CTRL_FLAG_INACTIVE)) {
+    if (query.flags &
+        (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_INACTIVE)) {
       LOG_INFO("V4L2 still {} control is not writable: flags=0x{:x}", name, query.flags);
       return;
     }
@@ -1053,13 +1049,12 @@ struct V4l2Backend::Impl {
     }
 
     const int previous_quality = jpeg.quality;
-    jpeg.quality              = 100;
+    jpeg.quality               = 100;
     jpeg.jpeg_markers |= V4L2_JPEG_MARKER_DHT | V4L2_JPEG_MARKER_DQT;
     if (ioctl_retry(fd, VIDIOC_S_JPEGCOMP, &jpeg)) {
       LOG_INFO("V4L2 still JPEG compression quality set: {} -> {}", previous_quality, jpeg.quality);
     } else {
-      LOG_INFO("V4L2 still JPEG compression quality was not accepted: {}",
-               std::strerror(errno));
+      LOG_INFO("V4L2 still JPEG compression quality was not accepted: {}", std::strerror(errno));
     }
   }
 
@@ -1148,8 +1143,8 @@ struct V4l2Backend::Impl {
     }
 
     const auto* data = static_cast<const uint8_t*>(buffers[buf.index].start);
-    latest_frame.rgb565 = preview_pool.acquire(
-        static_cast<size_t>(kPreviewOutputMaxWidth) * kPreviewOutputHeight);
+    latest_frame.rgb565 =
+        preview_pool.acquire(static_cast<size_t>(kPreviewOutputMaxWidth) * kPreviewOutputHeight);
     if (!latest_frame.rgb565) {
       return false;
     }
@@ -1265,9 +1260,7 @@ struct V4l2Backend::Impl {
                v4l2_format_name(pixel_format),
                buf.bytesused);
       if (++usable_frames <= kStillWarmupFrameCount) {
-        LOG_INFO("Dropping V4L2 still warmup frame {}/{}",
-                 usable_frames,
-                 kStillWarmupFrameCount);
+        LOG_INFO("Dropping V4L2 still warmup frame {}/{}", usable_frames, kStillWarmupFrameCount);
         (void)ioctl_retry(fd, VIDIOC_QBUF, &buf);
         continue;
       }
@@ -1288,21 +1281,12 @@ struct V4l2Backend::Impl {
 
     const auto* data = static_cast<const uint8_t*>(buffers[buf.index].start);
     std::vector<uint8_t> still_rgb;
-    int source_width = width;
+    int source_width  = width;
     int source_height = height;
-    const bool decoded = pixel_format == V4L2_PIX_FMT_MJPEG
-                             ? decompress_mjpeg(data,
-                                               buf.bytesused,
-                                               still_rgb,
-                                               source_width,
-                                               source_height)
-                             : yuv422_to_rgb888(data,
-                                               buf.bytesused,
-                                               width,
-                                               height,
-                                               stride,
-                                               pixel_format,
-                                               still_rgb);
+    const bool decoded =
+        pixel_format == V4L2_PIX_FMT_MJPEG
+            ? decompress_mjpeg(data, buf.bytesused, still_rgb, source_width, source_height)
+            : yuv422_to_rgb888(data, buf.bytesused, width, height, stride, pixel_format, still_rgb);
     if (!decoded) {
       return false;
     }
@@ -1384,15 +1368,18 @@ struct V4l2Backend::Impl {
     }
   }
 
-  CaptureState consume_capture_state(std::string* path) {
-    const CaptureState state = capture_state;
-    if (path) {
-      *path = last_capture_path_value;
+  CaptureResult consume_capture_result() {
+    CaptureResult result;
+    result.state                = capture_state;
+    result.path                 = last_capture_path_value;
+    result.requested_resolution = capture_resolution;
+    if (capture_state == CaptureState::Saved) {
+      result.saved_resolution = capture_resolution;
     }
     if (capture_state == CaptureState::Saved || capture_state == CaptureState::Failed) {
       capture_state = CaptureState::Idle;
     }
-    return state;
+    return result;
   }
 
   VideoState consume_video_state(std::string* path) {
@@ -1480,14 +1467,11 @@ void V4l2Backend::set_zoom_state(CameraZoomState state) {
 #endif
 }
 
-CaptureState V4l2Backend::consume_capture_state(std::string* path) {
+CaptureResult V4l2Backend::consume_capture_result() {
 #if USE_DESKTOP
-  if (path) {
-    path->clear();
-  }
-  return CaptureState::Idle;
+  return {};
 #else
-  return impl_->consume_capture_state(path);
+  return impl_->consume_capture_result();
 #endif
 }
 

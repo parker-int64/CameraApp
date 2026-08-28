@@ -41,6 +41,19 @@ struct CameraZoomState {
 enum class CaptureState { Idle, Requested, Saved, Failed };
 enum class VideoState { Idle, Recording, Saved, Failed };
 
+struct CaptureResult {
+  CaptureState state{CaptureState::Idle};
+  std::string path;
+  CameraResolution requested_resolution{};
+  CameraResolution saved_resolution{};
+
+  bool resolution_reduced() const {
+    return saved_resolution.width > 0 && saved_resolution.height > 0 &&
+           (saved_resolution.width != requested_resolution.width ||
+            saved_resolution.height != requested_resolution.height);
+  }
+};
+
 class CameraService : public BaseService {
  public:
   CameraService();
@@ -69,7 +82,7 @@ class CameraService : public BaseService {
   void zoom_out();
   void pan(int dx, int dy);
   CameraZoomState zoom_state() const { return zoom_state_; }
-  CaptureState consume_capture_state(std::string* path = nullptr);
+  CaptureResult consume_capture_result();
   VideoState consume_video_state(std::string* path = nullptr);
   bool has_preview() const { return preview_ready_; }
 
@@ -86,8 +99,7 @@ class CameraService : public BaseService {
   CameraFrame latest_frame_;
   bool new_frame_{false};
   bool preview_ready_{false};
-  CaptureState capture_state_{CaptureState::Idle};
-  std::string last_capture_path_;
+  CaptureResult capture_result_{};
   VideoState video_state_{VideoState::Idle};
   std::string last_video_path_;
   CameraResolution capture_resolution_{3280, 2464};

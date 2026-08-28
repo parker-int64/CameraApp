@@ -60,9 +60,9 @@ bool has_camera_keys_(int fd) {
   return test_bit_(key_bits, KEY_ESC) || test_bit_(key_bits, KEY_ENTER) ||
          test_bit_(key_bits, KEY_KPENTER) || test_bit_(key_bits, KEY_F) ||
          test_bit_(key_bits, KEY_X) || test_bit_(key_bits, KEY_Z) || test_bit_(key_bits, KEY_C) ||
-         test_bit_(key_bits, KEY_U) || test_bit_(key_bits, KEY_1) || test_bit_(key_bits, KEY_4) ||
-         test_bit_(key_bits, KEY_5) || test_bit_(key_bits, KEY_6) || test_bit_(key_bits, KEY_7) ||
-         test_bit_(key_bits, KEY_8);
+         test_bit_(key_bits, KEY_U) || test_bit_(key_bits, KEY_HELP) ||
+         test_bit_(key_bits, KEY_1) || test_bit_(key_bits, KEY_4) || test_bit_(key_bits, KEY_5) ||
+         test_bit_(key_bits, KEY_6) || test_bit_(key_bits, KEY_7) || test_bit_(key_bits, KEY_8);
 }
 
 bool env_enabled_(const char* name, bool fallback) {
@@ -311,6 +311,8 @@ uint32_t LinuxKeypad::translate_key_(uint16_t code) const {
     case KEY_TAB:
       return LV_KEY_NEXT;
     case KEY_H:
+      return 'h';
+    case KEY_HELP:
       return 'h';
     case KEY_F:
       return 'f';

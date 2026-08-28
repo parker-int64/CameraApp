@@ -34,5 +34,12 @@ static_lib
 # cache
 .cache/
 
+# venv
+.venv
+
+# temp
+temp
+tmp
+
 # TODO
 TODO

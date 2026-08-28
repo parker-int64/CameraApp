@@ -167,7 +167,7 @@ void CameraView::play_capture_feedback() {
   }
 }
 
-void CameraView::set_capture_status(service::CaptureState state, const std::string& path) {
+void CameraView::set_capture_status(const service::CaptureResult& result) {
   if (!capture_status_label_) {
     return;
   }
@@ -177,11 +177,17 @@ void CameraView::set_capture_status(service::CaptureState state, const std::stri
     capture_status_hide_timer_ = nullptr;
   }
 
-  if (state == service::CaptureState::Saved) {
-    const std::string text = "Saved " + path;
+  if (result.state == service::CaptureState::Saved) {
+    std::string text = "Saved " + std::to_string(result.saved_resolution.width) + "x" +
+                       std::to_string(result.saved_resolution.height);
+    if (result.resolution_reduced()) {
+      text += " (requested " + std::to_string(result.requested_resolution.width) + "x" +
+              std::to_string(result.requested_resolution.height) + ")";
+    }
+    text += " " + result.path;
     lv_label_set_text(capture_status_label_, text.c_str());
     lv_obj_remove_flag(capture_status_label_, LV_OBJ_FLAG_HIDDEN);
-  } else if (state == service::CaptureState::Failed) {
+  } else if (result.state == service::CaptureState::Failed) {
     lv_label_set_text(capture_status_label_, "Capture failed");
     lv_obj_remove_flag(capture_status_label_, LV_OBJ_FLAG_HIDDEN);
   } else {

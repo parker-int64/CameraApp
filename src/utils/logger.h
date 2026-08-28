@@ -64,6 +64,11 @@ class Logger {
   }
 
   template <typename... Args>
+  static void verbose(fmt::format_string<Args...> fmt_str, Args&&... args) {
+    log(LogLevel::TRACE, fmt::format(fmt_str, std::forward<Args>(args)...));
+  }
+
+  template <typename... Args>
   static void debug(fmt::format_string<Args...> fmt_str, Args&&... args) {
     log(LogLevel::DEBUG, fmt::format(fmt_str, std::forward<Args>(args)...));
   }
@@ -93,6 +98,14 @@ class Logger {
                        int line,
                        fmt::format_string<Args...> fmt_str,
                        Args&&... args) {
+    log(LogLevel::TRACE, fmt::format(fmt_str, std::forward<Args>(args)...), file, line);
+  }
+
+  template <typename... Args>
+  static void verbose_at(const char* file,
+                         int line,
+                         fmt::format_string<Args...> fmt_str,
+                         Args&&... args) {
     log(LogLevel::TRACE, fmt::format(fmt_str, std::forward<Args>(args)...), file, line);
   }
 
@@ -154,9 +167,13 @@ class Logger {
 
 #if APP_LOG_LEVEL >= APP_LOG_LEVEL_TRACE
 #define LOG_TRACE(...) ::util::Logger::trace_at(__FILE__, __LINE__, __VA_ARGS__)
+#define LOG_VERBOSE(...) ::util::Logger::verbose_at(__FILE__, __LINE__, __VA_ARGS__)
 #else
 #define LOG_TRACE(...) \
   do {                 \
+  } while (0)
+#define LOG_VERBOSE(...) \
+  do {                   \
   } while (0)
 #endif
 

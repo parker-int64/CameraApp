@@ -29,26 +29,29 @@ void expect_resolution(const std::filesystem::path& path, int width, int height)
 
 void test_supported_resolutions() {
   const auto path = temp_config_path();
+  write_config(path, R"({"camera":{"resolution":{"width":3280,"height":2464}}})");
+  expect_resolution(path, 3280, 2464);
+
   write_config(path, R"({"camera":{"resolution":{"width":1640,"height":1232}}})");
   expect_resolution(path, 1640, 1232);
 
   write_config(path, R"({"camera":{"resolution":{"width":1280,"height":720}}})");
-  expect_resolution(path, 1640, 1232);
+  expect_resolution(path, 3280, 2464);
   std::filesystem::remove(path);
 }
 
 void test_missing_malformed_and_mismatched_values_use_default() {
   const auto path = temp_config_path();
-  expect_resolution(path, 1640, 1232);
+  expect_resolution(path, 3280, 2464);
 
   write_config(path, "not-json");
-  expect_resolution(path, 1640, 1232);
+  expect_resolution(path, 3280, 2464);
 
   write_config(path, R"({"camera":{"resolution":{"width":640,"height":720}}})");
-  expect_resolution(path, 1640, 1232);
+  expect_resolution(path, 3280, 2464);
 
   write_config(path, R"({"camera":{"resolution":{"width":"640junk","height":480}}})");
-  expect_resolution(path, 1640, 1232);
+  expect_resolution(path, 3280, 2464);
   std::filesystem::remove(path);
 }
 
